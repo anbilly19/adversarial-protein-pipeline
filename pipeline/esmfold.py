@@ -24,7 +24,6 @@ from typing import List, Dict, Optional
 from .config import PipelineConfig
 from .trick_sequences import AA_VOCAB, AA_TO_IDX
 
-ESMFOLD_MODEL = "facebook/esmfold_v1"
 
 
 class ESMFoldScorer:
@@ -32,10 +31,14 @@ class ESMFoldScorer:
 
     def __init__(self, cfg: PipelineConfig):
         self.cfg = cfg
-        print(f"[ESMFold] Loading {ESMFOLD_MODEL}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(ESMFOLD_MODEL)
+        model_path = cfg.esmfold_model_path
+        local = "/" in model_path  # local path vs HuggingFace Hub ID
+        print(f"[ESMFold] Loading from {'local path' if local else 'HuggingFace'}: {model_path}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path, local_files_only=local
+        )
         self.model = EsmForProteinFolding.from_pretrained(
-            ESMFOLD_MODEL, low_cpu_mem_usage=True
+            model_path, low_cpu_mem_usage=True, local_files_only=local
         ).to(cfg.device)
         self.model.eval()
         # fp16 ESM-2 backbone to save VRAM (~8GB -> ~5GB)
