@@ -209,6 +209,18 @@ def parse_args():
                         help="Output directory for AF3 JSON files")
     parser.add_argument("--device", type=str, default=None,
                         help="Device: cuda or cpu (auto-detect if not set)")
+        parser.add_argument(
+        "--esmfold-path", type=str, default=None,
+        help="Local path to pre-downloaded ESMFold weights"
+    )
+    parser.add_argument(
+        "--protgpt2-path", type=str, default=None,
+        help="Local path to pre-downloaded ProtGPT2 weights"
+    )
+    parser.add_argument(
+        "--esm-if1-checkpoint", type=str, default=None,
+        help="Local path to esm_if1_gvp4_t16_142M_UR50.pt"
+    )
     return parser.parse_args()
 
 
@@ -220,6 +232,9 @@ if __name__ == "__main__":
         plddt_target=args.plddt_target,
         top_k_attack=args.top_k,
         output_dir=args.output_dir,
+                **({"esmfold_model_path": args.esmfold_path} if args.esmfold_path else {}),
+        **({"protgpt2_model_path": args.protgpt2_path} if args.protgpt2_path else {}),
+        **({"esm_if1_checkpoint": args.esm_if1_checkpoint} if args.esm_if1_checkpoint else {}),
     )
     if args.device:
         cfg.device = args.device
