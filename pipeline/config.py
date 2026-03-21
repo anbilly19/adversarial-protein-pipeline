@@ -1,9 +1,15 @@
 from dataclasses import dataclass
+import os
 import torch
 
 
 @dataclass
 class PipelineConfig:
+    # ── Model paths (set for air-gapped / HPC use) ──────────────────────
+    esmfold_model_path: str = os.environ.get("ESMFOLD_MODEL_PATH", "facebook/esmfold_v1")
+    protgpt2_model_path: str = os.environ.get("PROTGPT2_MODEL_PATH", "nferruz/ProtGPT2")
+    esm_if1_checkpoint: str = os.environ.get("ESM_IF1_CHECKPOINT", None)  # path to .pt file
+
     # ProtGPT2 generation
     n_generated: int = 50
     max_seq_len: int = 150
