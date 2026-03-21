@@ -34,8 +34,16 @@ class InverseFoldingModule:
         if self._model is None:
             try:
                 import esm
+                if self.cfg.esm_if1_checkpoint:
+                print(f"[ESM-IF1] Loading from local checkpoint: {self.cfg.esm_if1_checkpoint}")
+                self._model, self._alphabet = esm.pretrained.load_model_and_alphabet_core(
+                    "esm_if1_gvp4_t16_142M_UR50",
+                    self.cfg.esm_if1_checkpoint,
+                )
+            else:
+                print("[ESM-IF1] No local checkpoint set, downloading from HuggingFace...")
                 self._model, self._alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
-                self._model = self._model.eval().to(self.cfg.device)
+            self._model = self._model.eval().to(self.cfg.device)
                 print("[ESM-IF1] Model loaded")
             except ImportError:
                 raise ImportError(
