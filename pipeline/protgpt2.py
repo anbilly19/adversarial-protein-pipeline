@@ -12,7 +12,6 @@ from typing import List, Tuple
 from .config import PipelineConfig
 from .trick_sequences import AA_TO_IDX
 
-MODEL_NAME = "nferruz/ProtGPT2"
 
 
 class ProtGPT2Generator:
@@ -20,11 +19,15 @@ class ProtGPT2Generator:
 
     def __init__(self, cfg: PipelineConfig):
         self.cfg = cfg
-        print(f"[ProtGPT2] Loading {MODEL_NAME}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        self.model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(cfg.device)
-        self.model.eval()
-        print(f"[ProtGPT2] Ready on {cfg.device}")
+        model_path = cfg.protgpt2_model_path
+        local = "/" in model_path and not model_path.startswith("nferruz/")
+        print(f"[ProtGPT2] Loading from {'local path' if local else 'HuggingFace'}: {model_path}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path, local_files_only=local
+        )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_path, local_files_only=local
+        ).to(cfg.device)
 
     def generate(self, n: int = None) -> List[str]:
         """Generate n raw amino acid sequences.
