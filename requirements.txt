@@ -1,0 +1,15 @@
+# Core ML
+torch>=2.0.0
+transformers>=4.36.0
+accelerator>=0.25.0
+
+# Protein-specific
+fair-esm>=2.0.0          # ESMFold + ESM-IF1 (facebook/esm)
+biopython>=1.81          # PDB parsing
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Utilities
+tqdm>=4.65.0
