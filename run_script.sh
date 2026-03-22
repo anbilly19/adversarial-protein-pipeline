@@ -16,7 +16,7 @@ srun -K \
   --container-image=/netscratch/billimoria/esmfold_root_runtime.sqsh \
   --container-workdir="`pwd`" \
   --container-mounts=/netscratch/billimoria:/netscratch/billimoria,/fscratch/billimoria:/fscratch/billimoria,/ds-sds:/ds-sds:ro,/ds:/ds:ro,"`pwd`":"`pwd`" \
-  python "$@"
+  bash -c 'source /miniconda/etc/profile.d/conda.sh && conda activate py39-esmfold && python "$@"' -- "$@"
 
 
 # sbatch run_script.sh \
