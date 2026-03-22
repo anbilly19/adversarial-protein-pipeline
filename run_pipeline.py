@@ -29,15 +29,29 @@ from pipeline import (
 )
 
 
-def make_af3_job(seq: str, name: str, seeds: List[int] = None) -> Dict:
-    """Format a sequence as an AlphaFold3 server input JSON."""
-    return {
-        "name": name,
-        "modelSeeds": seeds or [42, 137, 999, 2024, 314],
-        "sequences": [
-            {"proteinChain": {"sequence": seq, "count": 1}}
-        ],
-    }
+def make_af3_job(seq: str, name: str, seed: int = 42) -> List[Dict]:
+    """Format a sequence as an AlphaFold3 server input JSON.
+
+    AlphaFold Server only allows a single seed per job.
+    Output format matches the alphafoldserver dialect v1.
+    Returns a list containing one job object.
+    """
+    return [
+        {
+            "name": name,
+            "modelSeeds": [seed],
+            "sequences": [
+                {
+                    "proteinChain": {
+                        "sequence": seq,
+                        "count": 1,
+                    }
+                }
+            ],
+            "dialect": "alphafoldserver",
+            "version": 1,
+        }
+    ]
 
 
 def print_summary(results: List[Dict], cfg: PipelineConfig) -> None:
@@ -92,15 +106,14 @@ def run(
     os.makedirs(cfg.output_dir, exist_ok=True)
     all_candidates: List[Dict] = []
 
-    # ── Stage 0: Trick sequences ──────────────────────────────────────────────
+    # -- Stage 0: Trick sequences ------------------------------------------------
     if use_tricks:
         tricks = get_all_trick_sequences()
         print(f"[Stage 0] Loaded {len(tricks)} trick sequences")
         all_candidates.extend(tricks)
 
-    # ── Stage 1: Inverse folding + BLOSUM mutations from PDB ─────────────────
+    # -- Stage 1: Inverse folding + BLOSUM mutations from PDB --------------------
     esm_scorer = ESMFoldScorer(cfg)
-
     if pdb_path:
         print(f"[Stage 1] Inverse folding from {pdb_path} (chain={chain_id})...")
         if_module = InverseFoldingModule(cfg)
@@ -112,12 +125,9 @@ def run(
         native_seq = if_seqs[0]["native_seq"]
         print("  -> Computing gradient sensitivity for native sequence...")
         grad_mag = esm_scorer.gradient_sensitivity(native_seq)
-
         blosum = BLOSUMAttack(cfg)
         mutants = blosum.gradient_guided_mutations(
-            native_seq, grad_mag,
-            n_mutations=cfg.n_mutations,
-            n_variants=15
+            native_seq, grad_mag, n_mutations=cfg.n_mutations, n_variants=15
         )
         blosum_cands = [
             {"seq": s, "name": f"blosum_{i:02d}", "source": "blosum_adversarial"}
@@ -126,23 +136,21 @@ def run(
         all_candidates.extend(blosum_cands)
         print(f"  -> {len(blosum_cands)} BLOSUM gradient-guided variants")
 
-    # ── Stage 2: ProtGPT2 generation ─────────────────────────────────────────
+    # -- Stage 2: ProtGPT2 generation --------------------------------------------
     if n_generated is None:
         n_generated = cfg.n_generated
-
     if n_generated > 0:
         print(f"[Stage 2] Generating {n_generated} sequences with ProtGPT2...")
         pg2 = ProtGPT2Generator(cfg)
         filtered = pg2.generate_and_filter()
         pg2_cands = [
-            {"seq": s, "name": f"protgpt2_{i:02d}_ppl{p:.1f}",
-             "source": "protgpt2", "perplexity": p}
+            {"seq": s, "name": f"protgpt2_{i:02d}_ppl{p:.1f}", "source": "protgpt2", "perplexity": p}
             for i, (s, p) in enumerate(filtered)
         ]
         all_candidates.extend(pg2_cands)
         print(f"  -> {len(pg2_cands)} ProtGPT2 sequences passed perplexity filter")
 
-    # ── Stage 3: Score all candidates with ESMFold ────────────────────────────
+    # -- Stage 3: Score all candidates with ESMFold ------------------------------
     print(f"[Stage 3] Scoring {len(all_candidates)} candidates with ESMFold...")
     seqs = [c["seq"] for c in all_candidates]
     plddt_scores = esm_scorer.score_batch(seqs)
@@ -151,23 +159,24 @@ def run(
 
     # Sort by initial pLDDT descending - best seeds for gradient attack
     all_candidates.sort(key=lambda x: x["init_plddt"], reverse=True)
-
     print("  Top 5 candidates before attack:")
     for c in all_candidates[:5]:
-        print(f"  [{c['source']:20s}] {c['name']:30s} pLDDT={c['init_plddt']:.1f}")
+        print(f"    [{c['source']:20s}] {c['name']:30s} pLDDT={c['init_plddt']:.1f}")
 
-    # ── Stage 4: ESM-Design gradient attack on top-k candidates ───────────────
+    # -- Stage 4: ESM-Design gradient attack on top-k candidates ----------------
     print(f"\n[Stage 4] Running ESM-Design attack on top {cfg.top_k_attack} candidates...")
     results = []
     for cand in all_candidates[:cfg.top_k_attack]:
-        print(f"\n  Attacking [{cand['source']}] {cand['name']} "
-              f"(len={len(cand['seq'])}, init_pLDDT={cand['init_plddt']:.1f})")
+        print(
+            f"\n  Attacking [{cand['source']}] {cand['name']} "
+            f"(len={len(cand['seq'])}, init_pLDDT={cand['init_plddt']:.1f})"
+        )
         result = esm_scorer.esm_design_attack(cand["seq"])
         result["source"] = cand["source"]
         result["name"] = cand["name"]
         results.append(result)
 
-    # ── Stage 5: Export AF3 JSON files ────────────────────────────────────────
+    # -- Stage 5: Export AF3 JSON files -----------------------------------------
     print(f"\n[Stage 5] Exporting AF3 job JSONs to {cfg.output_dir}/...")
     exported = 0
     for r in results:
@@ -209,30 +218,25 @@ def parse_args():
                         help="Output directory for AF3 JSON files")
     parser.add_argument("--device", type=str, default=None,
                         help="Device: cuda or cpu (auto-detect if not set)")
-    parser.add_argument(
-        "--esmfold-path", type=str, default=None,
-        help="Local path to pre-downloaded ESMFold weights"
-    )
-    parser.add_argument(
-        "--protgpt2-path", type=str, default=None,
-        help="Local path to pre-downloaded ProtGPT2 weights"
-    )
-    parser.add_argument(
-        "--esm-if1-checkpoint", type=str, default=None,
-        help="Local path to esm_if1_gvp4_t16_142M_UR50.pt"
-    )
+    parser.add_argument("--esmfold-path", type=str, default=None,
+                        help="Local path to pre-downloaded ESMFold weights")
+    parser.add_argument("--protgpt2-path", type=str, default=None,
+                        help="Local path to pre-downloaded ProtGPT2 weights")
+    parser.add_argument("--esm-if1-checkpoint", type=str, default=None,
+                        help="Local path to esm_if1_gvp4_t16_142M_UR50.pt")
+    parser.add_argument("--af3-seed", type=int, default=42,
+                        help="Single integer seed for AF3 modelSeeds (default: 42)")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-
     cfg = PipelineConfig(
         esm_design_steps=args.steps,
         plddt_target=args.plddt_target,
         top_k_attack=args.top_k,
         output_dir=args.output_dir,
-                **({"esmfold_model_path": args.esmfold_path} if args.esmfold_path else {}),
+        **({"esmfold_model_path": args.esmfold_path} if args.esmfold_path else {}),
         **({"protgpt2_model_path": args.protgpt2_path} if args.protgpt2_path else {}),
         **({"esm_if1_checkpoint": args.esm_if1_checkpoint} if args.esm_if1_checkpoint else {}),
     )
@@ -240,11 +244,22 @@ if __name__ == "__main__":
         cfg.device = args.device
 
     n_generated = 0 if args.tricks_only else args.n_generated
-
-    run(
+    results = run(
         cfg=cfg,
         pdb_path=args.pdb,
         chain_id=args.chain,
         use_tricks=args.use_tricks,
         n_generated=n_generated,
     )
+
+    # Re-export with user-specified seed if different from default
+    if args.af3_seed != 42:
+        print(f"\n[Re-export] Writing AF3 JSONs with seed={args.af3_seed}...")
+        for r in results:
+            job = make_af3_job(r["attacked_seq"], r["name"], seed=args.af3_seed)
+            fname = os.path.join(
+                cfg.output_dir,
+                f"{r['name']}_plddt{r['final_plddt']:.0f}.json"
+            )
+            with open(fname, "w") as f:
+                json.dump(job, f, indent=2)
