@@ -13,7 +13,7 @@
 
 srun -K \
   --export=ALL,NLTK_DATA=/netscratch/$USER/NLTK_DATA/,TQDM_DISABLE=1,HF_HOME=/fscratch/billimoria/HF_HOME/ \
-  --container-image=/netscratch/billimoria/esmfold_root_runtime.sqsh \
+  --container-image=/netscratch/billimoria/alphahack.sqsh \
   --container-workdir="`pwd`" \
   --container-mounts=/netscratch/billimoria:/netscratch/billimoria,/fscratch/billimoria:/fscratch/billimoria,/ds-sds:/ds-sds:ro,/ds:/ds:ro,"`pwd`":"`pwd`" \
   bash -c 'source /miniconda/etc/profile.d/conda.sh && conda activate py39-esmfold && python "$@"' -- "$@"
