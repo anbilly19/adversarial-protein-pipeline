@@ -1,14 +1,14 @@
 #!/bin/bash
 
-#SBATCH --output=/netscratch/billimoria/slurm/%x-2025-09-13-20-22-45-%j-%N.out
+#SBATCH --output=/netscratch/billimoria/slurm/alpha/%x-2025-09-13-20-22-45-%j-%N.out
 #SBATCH --partition=A100-80GB,A100-RP,H100,H100-RP,H200,H200-SDS
-#SBATCH --job-name="basesegform_vit_crossattn"
+#SBATCH --job-name="basesegform_esm_protgpt2"
 #SBATCH --nodes=1
 #SBATCH --gpus=2
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=50G
-#SBATCH --time=0-06:10:00
+#SBATCH --mem=40G
+#SBATCH --time=0-01:10:00
 #SBATCH --exclude=serv-3338
 
 srun -K \
@@ -17,3 +17,17 @@ srun -K \
   --container-workdir="`pwd`" \
   --container-mounts=/netscratch/billimoria:/netscratch/billimoria,/fscratch/billimoria:/fscratch/billimoria,/ds-sds:/ds-sds:ro,/ds:/ds:ro,"`pwd`":"`pwd`" \
   python "$@"
+
+
+# sbatch run_script.sh \
+#   run_pipeline.py \
+#   --protgpt2-path /netscratch/billimoria/weights/ProtGPT2 \
+#   --esmfold-path /netscratch/billimoria/weights/esmfold_v1 \
+#   --esm-if1-checkpoint /netscratch/billimoria/weights/esm_if1_gvp4_t16_142M_UR50.pt \
+#   --steps 300 \
+#   --plddt-target 90.0 \
+#   --top-k 5 \
+#   --n-generated 20 \
+#   --output-dir /netscratch/billimoria/adversarial_output \
+#   --use-tricks \
+#   --device cuda
