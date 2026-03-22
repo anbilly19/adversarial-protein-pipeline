@@ -4,7 +4,7 @@
 #SBATCH --partition=A100-80GB,A100-RP,H100,H100-RP,H200,H200-SDS
 #SBATCH --job-name="basesegform_esm_protgpt2"
 #SBATCH --nodes=1
-#SBATCH --gpus=2
+#SBATCH --gpus=1
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=40G
@@ -16,7 +16,8 @@ srun -K \
   --container-image=/netscratch/billimoria/alphahack.sqsh \
   --container-workdir="`pwd`" \
   --container-mounts=/netscratch/billimoria:/netscratch/billimoria,/fscratch/billimoria:/fscratch/billimoria,/ds-sds:/ds-sds:ro,/ds:/ds:ro,"`pwd`":"`pwd`" \
-  bash -c 'source /miniconda/etc/profile.d/conda.sh && conda activate py39-esmfold && python "$@"' -- "$@"
+  python "$@"
+  # bash -c 'source /miniconda/etc/profile.d/conda.sh && conda activate py39-esmfold && python "$@"' -- "$@"
 
 
 # sbatch run_script.sh \
