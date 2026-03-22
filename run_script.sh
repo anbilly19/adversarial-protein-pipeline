@@ -5,8 +5,8 @@
 #SBATCH --job-name="basesegform_esm_protgpt2"
 #SBATCH --nodes=1
 #SBATCH --gpus=1
-#SBATCH --ntasks-per-node=2
-#SBATCH --cpus-per-task=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=40G
 #SBATCH --time=0-01:10:00
 #SBATCH --exclude=serv-3338
