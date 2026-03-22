@@ -110,7 +110,7 @@ def run(
 
         # Gradient-guided BLOSUM mutations on native sequence
         native_seq = if_seqs[0]["native_seq"]
-        print(f"  -> Computing gradient sensitivity for native sequence...")
+        print("  -> Computing gradient sensitivity for native sequence...")
         grad_mag = esm_scorer.gradient_sensitivity(native_seq)
 
         blosum = BLOSUMAttack(cfg)
@@ -152,7 +152,7 @@ def run(
     # Sort by initial pLDDT descending - best seeds for gradient attack
     all_candidates.sort(key=lambda x: x["init_plddt"], reverse=True)
 
-    print(f"  Top 5 candidates before attack:")
+    print("  Top 5 candidates before attack:")
     for c in all_candidates[:5]:
         print(f"  [{c['source']:20s}] {c['name']:30s} pLDDT={c['init_plddt']:.1f}")
 
@@ -209,7 +209,7 @@ def parse_args():
                         help="Output directory for AF3 JSON files")
     parser.add_argument("--device", type=str, default=None,
                         help="Device: cuda or cpu (auto-detect if not set)")
-        parser.add_argument(
+    parser.add_argument(
         "--esmfold-path", type=str, default=None,
         help="Local path to pre-downloaded ESMFold weights"
     )

@@ -15,6 +15,8 @@ Reference:
 """
 
 import numpy as np
+import esm
+import torch
 from typing import List, Dict, Optional
 
 from .config import PipelineConfig
@@ -33,18 +35,18 @@ class InverseFoldingModule:
         """Lazy-load ESM-IF1 (requires fair-esm package)."""
         if self._model is None:
             try:
-                import esm
+                
                 if self.cfg.esm_if1_checkpoint:
-                print(f"[ESM-IF1] Loading from local checkpoint: {self.cfg.esm_if1_checkpoint}")
-                self._model, self._alphabet = esm.pretrained.load_model_and_alphabet_core(
-                    "esm_if1_gvp4_t16_142M_UR50",
-                    self.cfg.esm_if1_checkpoint,
-                )
-            else:
-                print("[ESM-IF1] No local checkpoint set, downloading from HuggingFace...")
-                self._model, self._alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
-            self._model = self._model.eval().to(self.cfg.device)
-                print("[ESM-IF1] Model loaded")
+                    print(f"[ESM-IF1] Loading from local checkpoint: {self.cfg.esm_if1_checkpoint}")
+                    self._model, self._alphabet = esm.pretrained.load_model_and_alphabet_core(
+                        "esm_if1_gvp4_t16_142M_UR50",
+                        self.cfg.esm_if1_checkpoint,
+                    )
+                else:
+                    print("[ESM-IF1] No local checkpoint set, downloading from HuggingFace...")
+                    self._model, self._alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
+                    self._model = self._model.eval().to(self.cfg.device)
+                    print("[ESM-IF1] Model loaded")
             except ImportError:
                 raise ImportError(
                     "fair-esm is required for inverse folding. "
@@ -73,7 +75,7 @@ class InverseFoldingModule:
         Returns:
             List of candidate dicts sorted by log-likelihood descending
         """
-        import esm
+        
         self._load()
 
         n_sequences = n_sequences or self.cfg.n_if_sequences
@@ -88,7 +90,7 @@ class InverseFoldingModule:
 
         results = []
         for i in range(n_sequences):
-            import torch
+            
             with torch.no_grad():
                 sampled_seq = self._model.sample(
                     coords, temperature=temperature, device=self.cfg.device
