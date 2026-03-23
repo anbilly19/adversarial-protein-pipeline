@@ -1,14 +1,14 @@
 #!/bin/bash
 
 #SBATCH --output=/netscratch/billimoria/slurm/alpha/%x-2025-09-13-20-22-45-%j-%N.out
-#SBATCH --partition=A100-80GB,A100-RP,H100,H100-RP,H200,H200-SDS
+#SBATCH --partition=A100-80GB,A100-RP,H100,H100-RP,H200,H200-SDS,A100-40GB,L40S,RTX3090,RTXA6000,V100-32GB
 #SBATCH --job-name="basesegform_esm_protgpt2"
 #SBATCH --nodes=1
 #SBATCH --gpus=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=20G
-#SBATCH --time=0-00:40:00
+#SBATCH --time=0-02:10:00
 #SBATCH --exclude=serv-3338
 
 srun -K \
