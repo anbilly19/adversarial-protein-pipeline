@@ -9,10 +9,10 @@ AlphaFold3's confidence metrics (pLDDT, PAE, ipTM) measure internal model consis
 | Strategy | Method | Key Insight |
 |---|---|---|
 | **ESM-Design attack** | Gradient descent through ESMFold | Replaces discrete tokenizer with soft embeddings — makes the entire forward 
-| **Evolutionary attack** | Population-based mutations via AlphaFold2 quality metrics | Black-box optimization without gradients — naturally avoids overfitting to ESMFold |pass differentiable |
-| **BLOSUM62 mutations** | Conservative substitutions at gradient-sensitive positions | Looks biologically valid but maximally disrupts co-evolutionary signal |
+| **Evolutionary attack** | Differential Evolution with mixed mutation operators (replacement, deletion, insertion) | Black-box optimization via AF2-Mutation strategies — naturally avoids overfitting to ESMFold || **BLOSUM62 mutations** | Conservative substitutions at gradient-sensitive positions | Looks biologically valid but maximally disrupts co-evolutionary signal |
 | **Inverse folding** | ESM-IF1 at high temperature | Generates structurally plausible sequences that deviate from the native — ideal adversarial seeds |
-| **Trick sequences** | Known fold-switchers + chameleons | Hard-coded adversarial seeds from fold-switching literature |
+| **Trick sequences** | Known fold-switchers + chameleons |
+Hard-coded adversarial seeds from fold-switching literature |
 
 ## Repository Structure
 
@@ -136,3 +136,4 @@ All three attack strategies share the same root cause: **AF3's confidence heads 
 - Hsu et al. 2022 — ESM-IF1 inverse folding (NeurIPS)
 - Porter et al. 2022 — RfaH fold-switching (PNAS)
 - Verkuil et al. 2022 — ESMFold (Science)
+- Pak et al. 2023 — Protein design via deep learning guided coevolution (AF2-Mutation)
