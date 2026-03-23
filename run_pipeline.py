@@ -184,24 +184,32 @@ def run(
             result = esm_scorer.esm_design_attack(cand["seq"])
             result["source"] = cand["source"]
             result["name"] = cand["name"]
+                        if "chain" in cand:
+                result["chain"] = cand["chain"]
             results.append(result)
         elif attack_method == "evolutionary":
             evo_attack = EvolutionaryAttack(cfg, esm_scorer)
             result = evo_attack.attack(cand["seq"])
             result["source"] = cand["source"]
             result["name"] = cand["name"] + "_evo"
+                        if "chain" in cand:
+                result["chain"] = cand["chain"]
             results.append(result)
         elif attack_method == "both":
             # Run gradient attack
             result_grad = esm_scorer.esm_design_attack(cand["seq"])
             result_grad["source"] = cand["source"]
             result_grad["name"] = cand["name"] + "_grad"
+                        if "chain" in cand:
+                result_grad["chain"] = cand["chain"]
             results.append(result_grad)
             # Run evolutionary attack
             evo_attack = EvolutionaryAttack(cfg, esm_scorer)
             result_evo = evo_attack.attack(cand["seq"])
             result_evo["source"] = cand["source"]
             result_evo["name"] = cand["name"] + "_evo"
+                        if "chain" in cand:
+                result_evo["chain"] = cand["chain"]
             results.append(result_evo)
     # -- Stage 5: Export AF3 JSON files -----------------------------------------
     print(f"\n[Stage 5] Exporting AF3 job JSONs to {cfg.output_dir}/...")
@@ -210,8 +218,9 @@ def run(
         job = make_af3_job(r["attacked_seq"], r["name"])
         fname = os.path.join(
             cfg.output_dir,
-            f"{r['name']}_plddt{r['final_plddt']:.0f}.json"
-        )
+            # Include chain ID in filename if present
+            chain_str = f"_chain{r['chain']}" if "chain" in r else ""
+            f"{r['name']}{chain_str}_plddt{r['final_plddt']:.0f}.json"        )
         with open(fname, "w") as f:
             json.dump(job, f, indent=2)
         exported += 1
