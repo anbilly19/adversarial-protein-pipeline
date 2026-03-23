@@ -298,6 +298,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         **({"esmfold_model_path": args.esmfold_path} if args.esmfold_path else {}),
         **({"protgpt2_model_path": args.protgpt2_path} if args.protgpt2_path else {}),
+                all_chains=args.all_chains,
         **({"esm_if1_checkpoint": args.esm_if1_checkpoint} if args.esm_if1_checkpoint else {}),
     )
     if args.device:
