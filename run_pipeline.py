@@ -26,6 +26,7 @@ from pipeline import (
     InverseFoldingModule,
     BLOSUMAttack,
     get_all_trick_sequences,
+    EvolutionaryAttack,
 )
 
 
@@ -82,6 +83,7 @@ def run(
     chain_id: str = "A",
     use_tricks: bool = True,
     n_generated: int = None,
+        attack_method: str = "gradient",
 ) -> List[Dict]:
     """Run the full adversarial protein pipeline.
 
@@ -98,6 +100,7 @@ def run(
         pdb_path: Optional path to PDB file for inverse folding
         chain_id: Chain to use from PDB
         use_tricks: Whether to include trick sequences
+                attack_method: Attack method - 'gradient' (ESM-Design), 'evolutionary' (AF2-Mutation), or 'both'
         n_generated: Override cfg.n_generated
 
     Returns:
@@ -210,6 +213,9 @@ def parse_args():
                         help="Number of ProtGPT2 sequences to generate")
     parser.add_argument("--steps", type=int, default=300,
                         help="ESM-Design gradient attack steps")
+        parser.add_argument("--attack-method", type=str, default="gradient",
+                        choices=["gradient", "evolutionary", "both"],
+                        help="Attack method: gradient (ESM-Design), evolutionary (AF2-Mutation), or both")
     parser.add_argument("--plddt-target", type=float, default=90.0,
                         help="pLDDT threshold for attack success")
     parser.add_argument("--top-k", type=int, default=5,
