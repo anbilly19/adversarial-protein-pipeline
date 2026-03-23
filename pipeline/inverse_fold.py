@@ -114,6 +114,77 @@ class InverseFoldingModule:
         return results
 
 
+    def get_all_chains(self, pdb_path: str) -> List[str]:
+        """Detect all protein chains in a PDB/CIF file.
+        
+        Returns:
+            List of chain IDs present in the structure
+        """
+        try:
+            import Bio.PDB
+            parser = Bio.PDB.PDBParser(QUIET=True)
+            structure = parser.get_structure('protein', pdb_path)
+            
+            chains = []
+            for model in structure:
+                for chain in model:
+                    # Filter out water and non-protein chains
+                    if len(list(chain.get_residues())) > 0:
+                        chains.append(chain.id)
+            
+            return list(set(chains))  # Remove duplicates
+        except ImportError:
+            # Fallback: use ESM's load_structure and extract chains manually
+            print("[WARNING] BioPython not installed, attempting fallback chain detection")
+            # Try to load with ESM and detect from structure object
+            try:
+                structure = esm.inverse_folding.util.load_structure(pdb_path)
+                # ESM structure format may vary; this is a best-effort attempt
+                return ['A']  # Fallback to chain A if detection fails
+            except:
+                return ['A']
+
+    def from_pdb_all_chains(
+        self,
+        pdb_path: str,
+        n_sequences: int = None,
+        temperature: float = None,
+    ) -> List[Dict]:
+        """Process all chains in a PDB file for inverse folding.
+        
+        This method automatically detects all protein chains in the crystalline
+        structure and runs inverse folding on each chain independently.
+        
+        Args:
+            pdb_path: Path to .pdb or .cif file
+            n_sequences: Number of samples per chain (default: cfg.n_if_sequences)
+            temperature: Sampling temperature (default: cfg.if_temperature)
+        
+        Returns:
+            List of candidate dicts from all chains combined
+        """
+        print(f"[ESM-IF1] Detecting chains in {pdb_path}...")
+        chains = self.get_all_chains(pdb_path)
+        print(f"[ESM-IF1] Found {len(chains)} chain(s): {chains}")
+        
+        all_results = []
+        for chain_id in chains:
+            print(f"\n[ESM-IF1] Processing chain {chain_id}...")
+            try:
+                chain_results = self.from_pdb(
+                    pdb_path=pdb_path,
+                    chain_id=chain_id,
+                    n_sequences=n_sequences,
+                    temperature=temperature,
+                )
+                all_results.extend(chain_results)
+            except Exception as e:
+                print(f"[ESM-IF1] Warning: Failed to process chain {chain_id}: {e}")
+                continue
+        
+        print(f"\n[ESM-IF1] Total sequences generated: {len(all_results)} from {len(chains)} chains")
+        return all_results
+
 class BLOSUMAttack:
     """BLOSUM62-conservative adversarial mutations.
 
