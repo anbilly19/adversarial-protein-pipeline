@@ -125,7 +125,7 @@ def run(
             if_seqs = if_module.from_pdb_all_chains(pdb_path)
         else:
             if_seqs = if_module.from_pdb(pdb_path, chain_id)        
-                    all_candidates.extend(if_seqs)
+            all_candidates.extend(if_seqs)
         print(f"  -> {len(if_seqs)} inverse-folded sequences")
 
         # Gradient-guided BLOSUM mutations on native sequence
@@ -184,7 +184,7 @@ def run(
             result = esm_scorer.esm_design_attack(cand["seq"])
             result["source"] = cand["source"]
             result["name"] = cand["name"]
-                        if "chain" in cand:
+            if "chain" in cand:
                 result["chain"] = cand["chain"]
             results.append(result)
         elif attack_method == "evolutionary":
@@ -192,7 +192,7 @@ def run(
             result = evo_attack.attack(cand["seq"])
             result["source"] = cand["source"]
             result["name"] = cand["name"] + "_evo"
-                        if "chain" in cand:
+            if "chain" in cand:
                 result["chain"] = cand["chain"]
             results.append(result)
         elif attack_method == "both":
@@ -200,27 +200,27 @@ def run(
             result_grad = esm_scorer.esm_design_attack(cand["seq"])
             result_grad["source"] = cand["source"]
             result_grad["name"] = cand["name"] + "_grad"
-                        if "chain" in cand:
-                result_grad["chain"] = cand["chain"]
+            if "chain" in cand:
+                 result_grad["chain"] = cand["chain"]
             results.append(result_grad)
             # Run evolutionary attack
             evo_attack = EvolutionaryAttack(cfg, esm_scorer)
             result_evo = evo_attack.attack(cand["seq"])
             result_evo["source"] = cand["source"]
             result_evo["name"] = cand["name"] + "_evo"
-                        if "chain" in cand:
-                result_evo["chain"] = cand["chain"]
+            if "chain" in cand:
+                 result_evo["chain"] = cand["chain"]
             results.append(result_evo)
     # -- Stage 5: Export AF3 JSON files -----------------------------------------
     print(f"\n[Stage 5] Exporting AF3 job JSONs to {cfg.output_dir}/...")
     exported = 0
     for r in results:
         job = make_af3_job(r["attacked_seq"], r["name"])
+        chain_str = f"_chain{r['chain']}" if "chain" in r else ""
         fname = os.path.join(
             cfg.output_dir,
             # Include chain ID in filename if present
-            chain_str = f"_chain{r['chain']}" if "chain" in r else ""
-            f"{r['name']}{chain_str}_plddt{r['final_plddt']:.0f}.json"        )
+        f"{r['name']}{chain_str}_plddt{r['final_plddt']:.0f}.json")
         with open(fname, "w") as f:
             json.dump(job, f, indent=2)
         exported += 1
@@ -238,8 +238,7 @@ def parse_args():
                         help="Path to PDB file for ESM-IF1 inverse folding")
     parser.add_argument("--chain", type=str, default="A",
                         help="Chain ID to use from PDB file")
-        parser.add_argument("--all-chains", action="store_true",
-                            
+    parser.add_argument("--all-chains", action="store_true",)
     parser.add_argument("--use-tricks", action="store_true", default=True,
                         help="Include known adversarial trick sequences")
     parser.add_argument("--tricks-only", action="store_true",
@@ -248,7 +247,7 @@ def parse_args():
                         help="Number of ProtGPT2 sequences to generate")
     parser.add_argument("--steps", type=int, default=300,
                         help="ESM-Design gradient attack steps")
-        parser.add_argument("--attack-method", type=str, default="gradient",
+    parser.add_argument("--attack-method", type=str, default="gradient",
                         choices=["gradient", "evolutionary", "both"],
                         help="Attack method: gradient (ESM-Design), evolutionary (AF2-Mutation), or both")
     parser.add_argument("--plddt-target", type=float, default=90.0,
