@@ -23,7 +23,6 @@ from pipeline import (
     PipelineConfig,
     ProtGPT2Generator,
     ESMFoldScorer,
-    InverseFoldingModule,
     BLOSUMAttack,
     get_all_trick_sequences,
     EvolutionaryAttack,
@@ -120,6 +119,7 @@ def run(
     if pdb_path:
         chain_info = "all chains" if cfg.all_chains else f"chain={chain_id}"
         print(f"[Stage 1] Inverse folding from {pdb_path} ({chain_info})...")
+                from pipeline import InverseFoldingModule
         if_module = InverseFoldingModule(cfg)
         if cfg.all_chains:
             if_seqs = if_module.from_pdb_all_chains(pdb_path)
