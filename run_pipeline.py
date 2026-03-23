@@ -166,19 +166,39 @@ def run(
     for c in all_candidates[:5]:
         print(f"    [{c['source']:20s}] {c['name']:30s} pLDDT={c['init_plddt']:.1f}")
 
-    # -- Stage 4: ESM-Design gradient attack on top-k candidates ----------------
-    print(f"\n[Stage 4] Running ESM-Design attack on top {cfg.top_k_attack} candidates...")
+    # -- Stage 4: Attack candidates with selected method(s) ---------------
+    print(f"\n[Stage 4] Running {attack_method} attack on top {cfg.top_k_attack} candidates...")
     results = []
+    
     for cand in all_candidates[:cfg.top_k_attack]:
         print(
             f"\n  Attacking [{cand['source']}] {cand['name']} "
             f"(len={len(cand['seq'])}, init_pLDDT={cand['init_plddt']:.1f})"
         )
-        result = esm_scorer.esm_design_attack(cand["seq"])
-        result["source"] = cand["source"]
-        result["name"] = cand["name"]
-        results.append(result)
-
+        
+        if attack_method == "gradient":
+            result = esm_scorer.esm_design_attack(cand["seq"])
+            result["source"] = cand["source"]
+            result["name"] = cand["name"]
+            results.append(result)
+        elif attack_method == "evolutionary":
+            evo_attack = EvolutionaryAttack(cfg, esm_scorer)
+            result = evo_attack.attack(cand["seq"])
+            result["source"] = cand["source"]
+            result["name"] = cand["name"] + "_evo"
+            results.append(result)
+        elif attack_method == "both":
+            # Run gradient attack
+            result_grad = esm_scorer.esm_design_attack(cand["seq"])
+            result_grad["source"] = cand["source"]
+            result_grad["name"] = cand["name"] + "_grad"
+            results.append(result_grad)
+            # Run evolutionary attack
+            evo_attack = EvolutionaryAttack(cfg, esm_scorer)
+            result_evo = evo_attack.attack(cand["seq"])
+            result_evo["source"] = cand["source"]
+            result_evo["name"] = cand["name"] + "_evo"
+            results.append(result_evo)
     # -- Stage 5: Export AF3 JSON files -----------------------------------------
     print(f"\n[Stage 5] Exporting AF3 job JSONs to {cfg.output_dir}/...")
     exported = 0
@@ -256,6 +276,7 @@ if __name__ == "__main__":
         chain_id=args.chain,
         use_tricks=args.use_tricks,
         n_generated=n_generated,
+                attack_method=args.attack_method,
     )
 
     # Re-export with user-specified seed if different from default
