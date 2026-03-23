@@ -118,10 +118,14 @@ def run(
     # -- Stage 1: Inverse folding + BLOSUM mutations from PDB --------------------
     esm_scorer = ESMFoldScorer(cfg)
     if pdb_path:
-        print(f"[Stage 1] Inverse folding from {pdb_path} (chain={chain_id})...")
+        chain_info = "all chains" if cfg.all_chains else f"chain={chain_id}"
+        print(f"[Stage 1] Inverse folding from {pdb_path} ({chain_info})...")
         if_module = InverseFoldingModule(cfg)
-        if_seqs = if_module.from_pdb(pdb_path, chain_id)
-        all_candidates.extend(if_seqs)
+        if cfg.all_chains:
+            if_seqs = if_module.from_pdb_all_chains(pdb_path)
+        else:
+            if_seqs = if_module.from_pdb(pdb_path, chain_id)        
+                    all_candidates.extend(if_seqs)
         print(f"  -> {len(if_seqs)} inverse-folded sequences")
 
         # Gradient-guided BLOSUM mutations on native sequence
@@ -225,6 +229,8 @@ def parse_args():
                         help="Path to PDB file for ESM-IF1 inverse folding")
     parser.add_argument("--chain", type=str, default="A",
                         help="Chain ID to use from PDB file")
+        parser.add_argument("--all-chains", action="store_true",
+                            
     parser.add_argument("--use-tricks", action="store_true", default=True,
                         help="Include known adversarial trick sequences")
     parser.add_argument("--tricks-only", action="store_true",
