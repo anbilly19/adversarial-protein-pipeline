@@ -21,9 +21,7 @@ from typing import List, Dict
 
 from pipeline import (
     PipelineConfig,
-    ProtGPT2Generator,
     ESMFoldScorer,
-    BLOSUMAttack,
     get_all_trick_sequences,
     EvolutionaryAttack,
 )
@@ -116,8 +114,7 @@ def run(
 
     # -- Stage 1: Inverse folding + BLOSUM mutations from PDB --------------------
     esm_scorer = ESMFoldScorer(cfg)
-    if pdb_path:
-        chain_info = "all chains" if cfg.all_chains else f"chain={chain_id}"
+    if False:  # DISABLED: inverse folding (requires torch_scatter)        chain_info = "all chains" if cfg.all_chains else f"chain={chain_id}"
         print(f"[Stage 1] Inverse folding from {pdb_path} ({chain_info})...")
         from pipeline import InverseFoldingModule
         if_module = InverseFoldingModule(cfg)
@@ -180,8 +177,7 @@ def run(
             f"(len={len(cand['seq'])}, init_pLDDT={cand['init_plddt']:.1f})"
         )
         
-        if attack_method == "gradient":
-            result = esm_scorer.esm_design_attack(cand["seq"])
+        if False:  # DISABLED: gradient attack (use evolutionary instead)            result = esm_scorer.esm_design_attack(cand["seq"])
             result["source"] = cand["source"]
             result["name"] = cand["name"]
             if "chain" in cand:
@@ -195,12 +191,10 @@ def run(
             if "chain" in cand:
                 result["chain"] = cand["chain"]
                 results.append(result)        
-            elif attack_method == "both":
-            # Run gradient attack
+        elif False:  # DISABLED: both attacks            # Run gradient attack
                 result_grad = esm_scorer.esm_design_attack(cand["seq"])
             result_grad["source"] = cand["source"]
-            result_grad["name"] = cand["name"] + "_grad"
-            if "chain" in cand:
+        elif False:  # DISABLED: both attacks (use evolutionary only)            if "chain" in cand:
                 result_grad["chain"] = cand["chain"]
             results.append(result_grad)
             # Run evolutionary attack
