@@ -1,0 +1,343 @@
+"""Evolutionary adversarial attack on protein sequences.
+
+Inspired by AF2-Mutation (Yuan et al. 2023, arXiv:2305.08929):
+  - Gradient-free evolutionary search
+  - Three mutation operators: replacement, deletion, insertion
+  - Beam search / (1+1)-ES: keep only improving mutants
+  - Targets ESMFold pLDDT as a black-box fitness signal
+
+Key insight from the paper: modifying only 3 residues via
+replacement + deletion + insertion can cause >46 lDDT points of
+structural deviation. This approach is:
+  - Completely gradient-free (treats model as black-box)
+  - Capable of large sequence-level modifications
+  - Focused: prioritises positions with highest pLDDT contribution
+
+Strategy overview
+-----------------
+1. Score the wild-type sequence with ESMFold to get per-residue pLDDT.
+2. Rank positions by per-residue pLDDT (descending) -- these are the
+   residues the model relies on most for its confidence; mutating them
+   has the largest impact.
+3. Run an evolutionary loop for `max_iters` iterations:
+     a. Sample `population_size` candidate sequences, each produced by
+        applying `ops_per_candidate` randomly drawn operators to the
+        current best sequence.
+     b. Operators (sampled with equal probability):
+        - REPLACE: substitute residue at a focus position with a
+          dissimilar amino acid (lowest BLOSUM62 score against original).
+        - DELETE: remove a residue at a focus position.
+        - INSERT: insert a random residue adjacent to a focus position.
+     c. Score all candidates with ESMFold (batch).
+     d. Accept the candidate with the highest mean pLDDT (maximise
+        confidence hacking -- we want AlphaFold3 to assign spuriously
+        high confidence to a structurally misleading sequence).
+     e. Anneal focus positions: as iterations progress, expand the
+        candidate positions to allow broader exploration.
+4. Return the best sequence found together with its pLDDT trajectory.
+
+Why this works against AF3
+--------------------------
+AF3 (like AF2) relies heavily on co-evolutionary signals embedded in
+its learned weights. Deleting or replacing structurally critical
+residues breaks the expected co-variation pattern at that position,
+causing the model to hallucinate a confident but incorrect fold.
+Insertions perturb the relative positional encoding and the
+pairwise distance map the diffusion module conditions on.
+"""
+
+import random
+import math
+from typing import List, Dict, Tuple, Optional
+
+import numpy as np
+
+from .config import PipelineConfig
+from .trick_sequences import BLOSUM62_SIMILAR, AA_TO_IDX
+
+# Full 20-AA alphabet
+AA_VOCAB = "ACDEFGHIKLMNPQRSTVWY"
+
+# BLOSUM62 full matrix (20x20) -- used to find maximally dissimilar replacements.
+# Row/col order matches AA_VOCAB above.
+# Values sourced from NCBI BLOSUM62.
+_BLOSUM62_ROWS = {
+    "A": [ 4,-1,-2,-2, 0,-1,-1, 0,-2,-1,-1,-1,-1,-2,-1, 1, 0,-3,-2, 0],
+    "C": [-1, 9,-3,-4,-2,-3,-3,-1,-3,-1,-1,-3,-3,-3,-3,-1,-1,-2,-2,-1],
+    "D": [-2,-3, 6, 2,-3,-1,-1,-3,-1,-4,-3, 1,-1, 0,-2, 0,-1,-4,-3,-3],
+    "E": [-2,-4, 2, 5,-3,-2, 0,-3, 1,-3,-2, 0,-1, 2, 0, 0,-1,-3,-2,-2],
+    "F": [ 0,-2,-3,-3, 6,-3,-1, 0,-3, 0, 0,-3,-4,-3,-3,-2,-2, 1, 3,-1],
+    "G": [-1,-3,-1,-2,-3, 6,-2,-4,-2,-4,-3, 0,-2,-2,-2, 0,-2,-2,-3,-3],
+    "H": [-1,-3,-1, 0,-1,-2, 8,-3,-1,-3,-2, 1,-2, 0, 0,-1,-2,-2, 2,-3],
+    "I": [ 0,-1,-3,-3, 0,-4,-3, 4,-3, 2, 1,-3,-3,-3,-3,-2,-1,-3,-1, 3],
+    "K": [-2,-3,-1, 1,-3,-2,-1,-3, 5,-2,-1, 0,-1, 1, 2, 0,-1,-3,-2,-2],
+    "L": [-1,-1,-4,-3, 0,-4,-3, 2,-2, 4, 2,-3,-3,-2,-2,-2,-1,-2,-1, 1],
+    "M": [-1,-1,-3,-2, 0,-3,-2, 1,-1, 2, 5,-2,-2, 0,-1,-1,-1,-1,-1, 1],
+    "N": [-1,-3, 1, 0,-3, 0, 1,-3, 0,-3,-2, 6,-2, 0, 0, 1, 0,-4,-2,-3],
+    "P": [-1,-3,-1,-1,-4,-2,-2,-3,-1,-3,-2,-2, 7,-1,-2,-1,-1,-4,-3,-2],
+    "Q": [-2,-3, 0, 2,-3,-2, 0,-3, 1,-2, 0, 0,-1, 5, 1, 0,-1,-2,-1,-2],
+    "R": [-1,-3,-2, 0,-3,-2, 0,-3, 2,-2,-1, 0,-2, 1, 5,-1,-1,-3,-2,-3],
+    "S": [ 1,-1, 0, 0,-2, 0,-1,-2, 0,-2,-1, 1,-1, 0,-1, 4, 1,-3,-2,-2],
+    "T": [ 0,-1,-1,-1,-2,-2,-2,-1,-1,-1,-1, 0,-1,-1,-1, 1, 5,-2,-2, 0],
+    "W": [-3,-2,-4,-3, 1,-2,-2,-3,-3,-2,-1,-4,-4,-2,-3,-3,-2,11, 2,-3],
+    "Y": [-2,-2,-3,-2, 3,-3, 2,-1,-2,-1,-1,-2,-3,-1,-2,-2,-2, 2, 7,-1],
+    "V": [ 0,-1,-3,-2,-1,-3,-3, 3,-2, 1, 1,-3,-2,-2,-3,-2, 0,-3,-1, 4],
+}
+
+# Build index -> AA map and dissimilarity lookup
+_IDX_TO_AA = list(AA_VOCAB)
+_AA_TO_IDX_LOCAL = {aa: i for i, aa in enumerate(AA_VOCAB)}
+
+def _most_dissimilar(aa: str, n: int = 3) -> List[str]:
+    """Return the `n` amino acids most dissimilar to `aa` by BLOSUM62."""
+    if aa not in _BLOSUM62_ROWS:
+        return random.sample([a for a in AA_VOCAB if a != aa], min(n, 19))
+    row = _BLOSUM62_ROWS[aa]
+    scored = sorted(zip(row, AA_VOCAB), key=lambda x: x[0])
+    return [a for _, a in scored[:n] if a != aa]
+
+
+def _apply_operator(
+    seq: str,
+    position: int,
+    operator: str,
+    rng: random.Random,
+) -> str:
+    """Apply one mutation operator to seq at the given position.
+
+    Operators:
+        'replace'  -- substitute seq[position] with a dissimilar AA
+        'delete'   -- remove seq[position]
+        'insert'   -- insert a random AA before seq[position]
+    """
+    if len(seq) == 0:
+        return seq
+    position = max(0, min(position, len(seq) - 1))
+
+    if operator == "replace":
+        candidates = _most_dissimilar(seq[position], n=5)
+        new_aa = rng.choice(candidates) if candidates else rng.choice(AA_VOCAB)
+        return seq[:position] + new_aa + seq[position + 1:]
+
+    elif operator == "delete":
+        if len(seq) <= 10:   # protect very short sequences
+            return seq
+        return seq[:position] + seq[position + 1:]
+
+    elif operator == "insert":
+        new_aa = rng.choice(AA_VOCAB)
+        return seq[:position] + new_aa + seq[position:]
+
+    return seq
+
+
+class EvolutionaryAttack:
+    """Gradient-free evolutionary adversarial attack on protein sequences.
+
+    Inspired by AF2-Mutation (Yuan et al. 2023):
+      - Treats ESMFold as a black-box oracle.
+      - Uses replacement, deletion, and insertion operators.
+      - Runs a (1+lambda) evolutionary strategy: at each iteration,
+        generate `population_size` children from the current best,
+        keep the one with the highest mean pLDDT.
+      - Focus positions are ranked by per-residue pLDDT contribution,
+        so edits land on the residues the model relies on most.
+    """
+
+    OPERATORS = ["replace", "delete", "insert"]
+
+    def __init__(self, cfg: PipelineConfig, esm_scorer):
+        self.cfg = cfg
+        self.esm_scorer = esm_scorer
+
+    def _focus_positions(
+        self,
+        seq: str,
+        per_residue_plddt: np.ndarray,
+        n_focus: int,
+        annealing_factor: float = 1.0,
+    ) -> List[int]:
+        """Return positions sorted by descending per-residue pLDDT.
+
+        `annealing_factor` in (0,1] controls how many extra positions are
+        eligible: at 1.0 only the top-n_focus positions; at 0.0 all positions.
+        The actual pool size is n_focus + int((len(seq) - n_focus) * (1 - annealing_factor)).
+        """
+        n = len(per_residue_plddt)
+        extra = int((n - n_focus) * (1.0 - annealing_factor))
+        pool_size = min(n, n_focus + extra)
+        ranked = np.argsort(per_residue_plddt)[::-1]
+        return ranked[:pool_size].tolist()
+
+    def attack(
+        self,
+        seq: str,
+        max_iters: int = 200,
+        population_size: int = 20,
+        ops_per_candidate: int = 3,
+        n_focus: int = 10,
+        verbose: bool = True,
+    ) -> Dict:
+        """Run the evolutionary attack.
+
+        Args:
+            seq: Wild-type amino acid sequence (single letter).
+            max_iters: Number of evolutionary generations.
+            population_size: Children generated per generation.
+            ops_per_candidate: Number of mutation operators applied per child.
+            n_focus: Initial number of focus positions (highest-pLDDT residues).
+            verbose: Print progress.
+
+        Returns:
+            Dict with keys:
+                orig_seq        -- input sequence
+                attacked_seq    -- best adversarial sequence found
+                orig_plddt      -- mean pLDDT of original sequence
+                final_plddt     -- mean pLDDT of best adversarial sequence
+                plddt_trajectory-- list of mean pLDDT values over iterations
+                n_mutations     -- approximate edit distance from original
+                attack_success  -- bool: final_plddt >= cfg.plddt_target
+                source          -- "evolutionary_attack"
+        """
+        rng = random.Random(42)
+
+        # --- Initial scoring ---
+        orig_plddt_mean, orig_per_residue = self.esm_scorer.score_with_per_residue(seq)
+        best_seq = seq
+        best_plddt = orig_plddt_mean
+        trajectory = [orig_plddt_mean]
+
+        if verbose:
+            print(f"  [EvoAttack] Start pLDDT={orig_plddt_mean:.1f} len={len(seq)}")
+
+        for iteration in range(max_iters):
+            # Early stopping
+            if best_plddt >= self.cfg.plddt_target:
+                if verbose:
+                    print(f"  [EvoAttack] Target reached at iter {iteration}!")
+                break
+
+            # Annealing: start focused, gradually broaden
+            annealing = max(0.05, 1.0 - (iteration / max_iters) * 0.9)
+
+            # Re-score best_seq if it changed (for updated focus positions)
+            if iteration == 0 or iteration % 20 == 0:
+                _, per_residue = self.esm_scorer.score_with_per_residue(best_seq)
+            else:
+                per_residue = orig_per_residue  # reuse initial for speed
+
+            focus_pool = self._focus_positions(
+                best_seq, per_residue, n_focus, annealing_factor=annealing
+            )
+
+            # --- Generate children ---
+            children = []
+            for _ in range(population_size):
+                child = best_seq
+                for _ in range(ops_per_candidate):
+                    pos = rng.choice(focus_pool) if focus_pool else rng.randint(0, len(child) - 1)
+                    # Clamp position to current (possibly shorter/longer) sequence
+                    pos = max(0, min(pos, len(child) - 1))
+                    op = rng.choice(self.OPERATORS)
+                    child = _apply_operator(child, pos, op, rng)
+                    # Update pool position bounds after length change
+                    focus_pool = [min(p, len(child) - 1) for p in focus_pool]
+                children.append(child)
+
+            # Remove duplicates and empty sequences
+            children = list({c for c in children if len(c) >= 10})
+            if not children:
+                continue
+
+            # --- Score children in batch ---
+            child_plddts = self.esm_scorer.score_batch(children)
+
+            # --- Selection: keep the best child if it improves ---
+            best_child_idx = int(np.argmax(child_plddts))
+            best_child_plddt = child_plddts[best_child_idx]
+
+            if best_child_plddt > best_plddt:
+                best_seq = children[best_child_idx]
+                best_plddt = best_child_plddt
+                if verbose:
+                    print(
+                        f"  [EvoAttack] iter={iteration:3d} pLDDT={best_plddt:.1f} "
+                        f"len={len(best_seq)} (+{best_plddt - orig_plddt_mean:.1f})"
+                    )
+
+            trajectory.append(best_plddt)
+
+        # Approximate edit distance
+        n_mutations = sum(1 for a, b in zip(seq, best_seq) if a != b)
+        n_mutations += abs(len(seq) - len(best_seq))
+
+        return {
+            "orig_seq": seq,
+            "attacked_seq": best_seq,
+            "orig_plddt": orig_plddt_mean,
+            "final_plddt": best_plddt,
+            "plddt_trajectory": trajectory,
+            "n_mutations": n_mutations,
+            "attack_success": best_plddt >= self.cfg.plddt_target,
+            "source": "evolutionary_attack",
+        }
+
+    def focused_deletion_sweep(
+        self,
+        seq: str,
+        max_deletions: int = 5,
+        verbose: bool = True,
+    ) -> Dict:
+        """Greedy deletion sweep inspired by AF2-Mutation.
+
+        Iteratively deletes the single residue whose removal maximally
+        increases mean pLDDT, up to `max_deletions` times.
+        This is a deterministic, focused variant of the evolutionary attack.
+
+        Args:
+            seq: Input sequence.
+            max_deletions: Maximum number of residues to delete.
+            verbose: Print progress.
+
+        Returns:
+            Same dict format as `attack()`.
+        """
+        orig_plddt, _ = self.esm_scorer.score_with_per_residue(seq)
+        best_seq = seq
+        best_plddt = orig_plddt
+        trajectory = [orig_plddt]
+
+        if verbose:
+            print(f"  [DeletionSweep] Start pLDDT={orig_plddt:.1f} len={len(seq)}")
+
+        for step in range(max_deletions):
+            if len(best_seq) <= 10:
+                break
+            # Generate all single-deletion variants
+            candidates = [best_seq[:i] + best_seq[i + 1:] for i in range(len(best_seq))]
+            scores = self.esm_scorer.score_batch(candidates)
+            best_idx = int(np.argmax(scores))
+            if scores[best_idx] > best_plddt:
+                best_seq = candidates[best_idx]
+                best_plddt = scores[best_idx]
+                trajectory.append(best_plddt)
+                if verbose:
+                    print(
+                        f"  [DeletionSweep] step={step} deleted pos={best_idx} "
+                        f"pLDDT={best_plddt:.1f} len={len(best_seq)}"
+                    )
+            else:
+                if verbose:
+                    print(f"  [DeletionSweep] No improving deletion found at step {step}.")
+                break
+
+        return {
+            "orig_seq": seq,
+            "attacked_seq": best_seq,
+            "orig_plddt": orig_plddt,
+            "final_plddt": best_plddt,
+            "plddt_trajectory": trajectory,
+            "n_mutations": len(seq) - len(best_seq),
+            "attack_success": best_plddt >= self.cfg.plddt_target,
+            "source": "deletion_sweep",
+        }
