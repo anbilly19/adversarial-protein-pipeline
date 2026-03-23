@@ -1,5 +1,15 @@
 """Evolutionary attack for adversarial protein design.
 
+
+TODO: Enhance with AF2-Mutation strategies (arXiv:2305.08929):
+    - Implement Differential Evolution (DE) instead of simple GA
+      * DE mutation: V_G+1 = P_r1 + F × (P_r2 - P_r3)
+      * DE crossover with CR (crossover rate)
+    - Add deletion mutations (remove amino acids)
+    - Add insertion mutations (add amino acids)
+    - Use lDDT gap as fitness (difference between WT and mutant structure)
+    - Implement mixed mutation strategies (replacement + deletion + insertion)
+    - Current implementation: Simple GA with point mutations only
 Gradient-free black-box optimization using evolutionary strategies.
 Inspired by AF2-Mutation and genetic algorithms for protein engineering.
 
