@@ -26,7 +26,6 @@ from pipeline import (
     InverseFoldingModule,
     BLOSUMAttack,
     get_all_trick_sequences,
-    EvolutionaryAttack,
 )
 
 
@@ -188,30 +187,9 @@ def run(
                 result["chain"] = cand["chain"]
             results.append(result)
         elif attack_method == "evolutionary":
-            evo_attack = EvolutionaryAttack(cfg, esm_scorer)
-            result = evo_attack.attack(cand["seq"])
-            result["source"] = cand["source"]
-            result["name"] = cand["name"] + "_evo"
-            if "chain" in cand:
-                result["chain"] = cand["chain"]
-            results.append(result)
+                        raise NotImplementedError("Evolutionary attack is not yet implemented. Use --attack-method gradient instead.")
         elif attack_method == "both":
-            # Run gradient attack
-            result_grad = esm_scorer.esm_design_attack(cand["seq"])
-            result_grad["source"] = cand["source"]
-            result_grad["name"] = cand["name"] + "_grad"
-            if "chain" in cand:
-                 result_grad["chain"] = cand["chain"]
-            results.append(result_grad)
-            # Run evolutionary attack
-            evo_attack = EvolutionaryAttack(cfg, esm_scorer)
-            result_evo = evo_attack.attack(cand["seq"])
-            result_evo["source"] = cand["source"]
-            result_evo["name"] = cand["name"] + "_evo"
-            if "chain" in cand:
-                 result_evo["chain"] = cand["chain"]
-            results.append(result_evo)
-    # -- Stage 5: Export AF3 JSON files -----------------------------------------
+            raise NotImplementedError("'both' attack method is not yet implemented. Use --attack-method gradient instead.")    # -- Stage 5: Export AF3 JSON files -----------------------------------------
     print(f"\n[Stage 5] Exporting AF3 job JSONs to {cfg.output_dir}/...")
     exported = 0
     for r in results:
