@@ -8,7 +8,8 @@ AlphaFold3's confidence metrics (pLDDT, PAE, ipTM) measure internal model consis
 
 | Strategy | Method | Key Insight |
 |---|---|---|
-| **ESM-Design attack** | Gradient descent through ESMFold | Replaces discrete tokenizer with soft embeddings — makes the entire forward pass differentiable |
+| **ESM-Design attack** | Gradient descent through ESMFold | Replaces discrete tokenizer with soft embeddings — makes the entire forward 
+| **Evolutionary attack** | Population-based mutations via AlphaFold2 quality metrics | Black-box optimization without gradients — naturally avoids overfitting to ESMFold |pass differentiable |
 | **BLOSUM62 mutations** | Conservative substitutions at gradient-sensitive positions | Looks biologically valid but maximally disrupts co-evolutionary signal |
 | **Inverse folding** | ESM-IF1 at high temperature | Generates structurally plausible sequences that deviate from the native — ideal adversarial seeds |
 | **Trick sequences** | Known fold-switchers + chameleons | Hard-coded adversarial seeds from fold-switching literature |
@@ -73,6 +74,30 @@ python run_pipeline.py \
   --output-dir af3_jobs
 ```
 
+### Mode 5 — Evolutionary attack only (gradient-free)
+
+```bash
+python run_pipeline.py --pdb protein.pdb --chain A --attack-method evolutionary --n-generated 0
+```
+
+### Mode 6 — Multi-chain crystalline structures
+
+```bash
+# Process all chains in a PDB file (e.g., for crystalline structures)
+python run_pipeline.py --pdb protein.pdb --all-chains --attack-method gradient --top-k 3
+```
+
+Each chain's mutations will be exported as separate AF3 JSON files with chain IDs in filenames:
+- `if_00_chainA_plddt92.json`
+- `if_00_chainB_plddt88.json`
+- etc.
+
+### Mode 7 — Both attack methods (gradient + evolutionary)
+
+```bash
+python run_pipeline.py --pdb protein.pdb --chain A --attack-method both --top-k 5
+```
+
 Outputs are AlphaFold3-compatible JSON files in `af3_jobs/` ready to submit to the AF3 server or local inference.
 
 ## Pipeline Stages
@@ -98,6 +123,7 @@ Stage 5  AF3 export          Write JSON jobs for each successful attack
 | `n_mutations` | 5 | BLOSUM positions to mutate |
 | `if_temperature` | 1.5 | ESM-IF1 sampling temp (higher = more diverse) |
 | `top_k_attack` | 5 | Candidates to run gradient attack on |
+| `attack_method` | "gradient" | "gradient" (ESM-Design), "evolutionary" (AF2-Mutation), or "both" |
 
 ## Why It Works
 
