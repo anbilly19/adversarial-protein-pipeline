@@ -13,7 +13,7 @@
 
 srun -K \
   --export=ALL,NLTK_DATA=/netscratch/$USER/NLTK_DATA/,TQDM_DISABLE=1,HF_HOME=/fscratch/billimoria/HF_HOME/ \
-  --container-image=/netscratch/billimoria/alphahack.sqsh \
+  --container-image=/netscratch/billimoria/alphahack_v1.sqsh \
   --container-workdir="`pwd`" \
   --container-mounts=/netscratch/billimoria:/netscratch/billimoria,/fscratch/billimoria:/fscratch/billimoria,/ds-sds:/ds-sds:ro,/ds:/ds:ro,"`pwd`":"`pwd`" \
   python "$@"
