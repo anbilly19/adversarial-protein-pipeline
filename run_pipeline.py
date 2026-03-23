@@ -114,8 +114,35 @@ def run(
 
     # -- Stage 1: Inverse folding + BLOSUM mutations from PDB --------------------
     esm_scorer = ESMFoldScorer(cfg)
-    if False:  # DISABLED: inverse folding (requires torch_scatter)        chain_info = "all chains" if cfg.all_chains else f"chain={chain_id}"
-        print(f"[Stage 1] Inverse folding from {pdb_path} ({chain_info})...")
+    if pdb_path:  # Extract sequences from PDB (all chains)        print(f"[Stage 1] Inverse folding from {pdb_path} ({chain_info})...")
+                from Bio.PDB import PDBParser
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure('protein', pdb_path)
+        
+        print(f"[Stage 1] Extracting sequences from {pdb_path} (all chains)...")
+        pdb_seqs = []
+        for model in structure:
+            for chain in model:
+                chain_id = chain.get_id()
+                # Extract sequence from chain
+                residues = [res for res in chain if res.get_id()[0] == ' ']  # Only standard residues
+                if len(residues) == 0:
+                    continue
+                # Convert 3-letter codes to 1-letter
+                from Bio.SeqUtils import seq1
+                try:
+                    sequence = seq1(''.join([res.get_resname() for res in residues]))
+                    pdb_seqs.append({
+                        'seq': sequence,
+                        'name': f'pdb_chain{chain_id}',
+                        'source': 'pdb_extraction',
+                        'chain': chain_id
+                    })
+                except:
+                    pass  # Skip chains with non-standard residues
+        
+        all_candidates.extend(pdb_seqs)
+        print(f" -> {len(pdb_seqs)} chains extracted from PDB")
         from pipeline import InverseFoldingModule
         if_module = InverseFoldingModule(cfg)
         if cfg.all_chains:
