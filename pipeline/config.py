@@ -37,4 +37,4 @@ class PipelineConfig:
     top_k_attack: int = 5
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir: str = "af3_attack_jobs"
-        all_chains: bool = False  # Process all chains in PDB file
+    all_chains: bool = False  # Process all chains in PDB file
