@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from transformers import EsmForProteinFolding, EsmTokenizer
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 from .config import PipelineConfig
 from .trick_sequences import AA_VOCAB, AA_TO_IDX
@@ -52,7 +52,9 @@ class ESMFoldScorer:
                 "facebook/esmfold_v1", local_files_only=False
             )
         self.model = EsmForProteinFolding.from_pretrained(
-            model_path, low_cpu_mem_usage=True, local_files_only=local,
+            model_path,
+            low_cpu_mem_usage=True,
+            local_files_only=local,
             ignore_mismatched_sizes=True
         ).to(cfg.device)
         self.model.eval()
@@ -65,6 +67,7 @@ class ESMFoldScorer:
     # ------------------------------------------------------------------
     # Scoring
     # ------------------------------------------------------------------
+
     def score(self, seq: str) -> float:
         """Return mean pLDDT (0-100) for a single sequence."""
         tokens = self.tokenizer(
@@ -89,6 +92,25 @@ class ESMFoldScorer:
                 scores.append(out["plddt"][j, : len(seq)].mean().item() * 100)
         return scores
 
+    def score_with_per_residue(self, seq: str) -> Tuple[float, np.ndarray]:
+        """Return (mean_pLDDT, per_residue_pLDDT_array) for a single sequence.
+
+        Used by EvolutionaryAttack to identify structurally critical positions
+        (high per-residue pLDDT) for focused mutation.
+
+        Returns:
+            mean_plddt: float, mean pLDDT over all residues (0-100 scale)
+            per_residue: np.ndarray of shape [L], per-residue pLDDT (0-100 scale)
+        """
+        tokens = self.tokenizer(
+            [seq], return_tensors="pt", add_special_tokens=False
+        ).to(self.cfg.device)
+        with torch.no_grad():
+            out = self.model(**tokens)
+        per_residue = out["plddt"][0, : len(seq)].cpu().numpy() * 100  # [L]
+        mean_plddt = float(per_residue.mean())
+        return mean_plddt, per_residue
+
     def score_with_pae(self, seq: str) -> Dict:
         """Return pLDDT + PAE matrix for a single sequence."""
         tokens = self.tokenizer(
@@ -106,6 +128,7 @@ class ESMFoldScorer:
     # ------------------------------------------------------------------
     # ESM-Design Adversarial Attack (corrected injection point)
     # ------------------------------------------------------------------
+
     def _seq_to_logits(self, seq: str) -> torch.Tensor:
         """Convert AA string to sharp initial logits over 20 AA classes [L, 20]."""
         idxs = [AA_TO_IDX[aa] for aa in seq if aa in AA_TO_IDX]
@@ -132,7 +155,6 @@ class ESMFoldScorer:
         # The 20 standard AA embeddings at indices 6..25
         aa_embeds = embed_w[_ESM_AA_START:_ESM_AA_END].float()  # [20, D]
         seq_embed = soft_tokens @ aa_embeds  # [L, D]
-
         cls_embed = embed_w[self.model.esm_dict_cls_idx].float().unsqueeze(0)  # [1, D]
         eos_embed = embed_w[self.model.esm_dict_eos_idx].float().unsqueeze(0)  # [1, D]
         # [1, L+2, D]
@@ -149,7 +171,7 @@ class ESMFoldScorer:
         Returns per-residue pLDDT [L].
 
         This correctly matches EsmForProteinFolding.forward() which calls:
-            esm hidden states -> esm_s_mlp -> trunk(seq_feats, pair_feats, aa, pos_ids, mask)
+        esm hidden states -> esm_s_mlp -> trunk(seq_feats, pair_feats, aa, pos_ids, mask)
         """
         B = 1
         device = self.cfg.device
@@ -164,8 +186,10 @@ class ESMFoldScorer:
             attention_mask=attn_mask,
             output_hidden_states=True,
         )
+
         # Stack all hidden states: [B, L+2, n_layers+1, D]
-        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)  # [B, L+2, n_layers+1, D]
+        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)
+        # [B, L+2, n_layers+1, D]
         esm_s = esm_hidden[:, 1:-1]  # strip CLS/EOS: [B, L, n_layers+1, D]
 
         # Project to trunk sequence features
@@ -207,17 +231,17 @@ class ESMFoldScorer:
         """Gradient descent through ESMFold to maximize mean pLDDT.
 
         Algorithm:
-            1. Initialize logits from seed sequence (sharp one-hot * 10)
-            2. At each step, sample via Gumbel-softmax at temperature tau
-            3. Compute soft ESM-2 embeddings and run full ESMFold pipeline
-            4. Loss = -mean(pLDDT) -> backprop -> Adam step on logits
-            5. Anneal tau: 1.0 -> 0.1 (encourages discrete convergence)
-            6. Track best sequence at highest pLDDT step
+        1. Initialize logits from seed sequence (sharp one-hot * 10)
+        2. At each step, sample via Gumbel-softmax at temperature tau
+        3. Compute soft ESM-2 embeddings and run full ESMFold pipeline
+        4. Loss = -mean(pLDDT) -> backprop -> Adam step on logits
+        5. Anneal tau: 1.0 -> 0.1 (encourages discrete convergence)
+        6. Track best sequence at highest pLDDT step
         """
         steps = steps or self.cfg.esm_design_steps
         L = len(seq)
-
         orig_plddt = self.score(seq)
+
         logits = torch.nn.Parameter(self._seq_to_logits(seq).to(self.cfg.device))
         optimizer = torch.optim.Adam([logits], lr=self.cfg.esm_lr)
 
@@ -231,8 +255,9 @@ class ESMFoldScorer:
             tau = self.cfg.esm_temp * (
                 self.cfg.esm_temp_final / self.cfg.esm_temp
             ) ** progress
+
             soft_tokens = F.gumbel_softmax(logits, tau=tau, hard=False)  # [L, 20]
-            full_embed = self._soft_embed_to_esm_hidden(soft_tokens)     # [1, L+2, D]
+            full_embed = self._soft_embed_to_esm_hidden(soft_tokens)  # [1, L+2, D]
             plddt_per_residue = self._forward_from_esm_embed(full_embed, L)  # [L]
             mean_plddt = plddt_per_residue.mean()
             loss = -mean_plddt
@@ -246,7 +271,7 @@ class ESMFoldScorer:
                 best_seq = self._logits_to_seq(logits)
             if verbose and step % 50 == 0:
                 print(
-                    f"  [ESM-Design] step {step:3d}/{steps} "
+                    f"    [ESM-Design] step {step:3d}/{steps} "
                     f"tau={tau:.3f} pLDDT={cur_plddt:.1f}"
                 )
 
@@ -269,6 +294,7 @@ class ESMFoldScorer:
         tokens = self.tokenizer(
             [seq], return_tensors="pt", add_special_tokens=False
         ).to(self.cfg.device)
+
         # Get the ESM-2 word embeddings for the input, with gradients enabled
         input_ids = tokens["input_ids"]
         # Add CLS/EOS as ESMFold does internally
@@ -297,7 +323,6 @@ class ESMFoldScorer:
         true_aa = torch.zeros(B, L, device=self.cfg.device, dtype=torch.long)
         position_ids = torch.arange(L, device=self.cfg.device).unsqueeze(0)
         mask = torch.ones(B, L, device=self.cfg.device, dtype=torch.float)
-
         structure = self.model.trunk(
             s_s_0, s_z_0, true_aa, position_ids, mask, no_recycles=0
         )
@@ -307,7 +332,6 @@ class ESMFoldScorer:
         )
         plddt = categorical_lddt(lddt_head[-1], bins=self.model.lddt_bins)
         plddt.mean().backward()
-
         # Gradient w.r.t. the residue embeddings (strip CLS/EOS)
         grad_mag = embed.grad[0, 1:-1].norm(dim=-1).detach().cpu().numpy()  # [L]
         return grad_mag
