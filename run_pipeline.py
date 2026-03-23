@@ -194,9 +194,10 @@ def run(
             result["name"] = cand["name"] + "_evo"
             if "chain" in cand:
                 result["chain"] = cand["chain"]
-            results.append(result)        elif attack_method == "both":
+                results.append(result)        
+            elif attack_method == "both":
             # Run gradient attack
-            result_grad = esm_scorer.esm_design_attack(cand["seq"])
+                result_grad = esm_scorer.esm_design_attack(cand["seq"])
             result_grad["source"] = cand["source"]
             result_grad["name"] = cand["name"] + "_grad"
             if "chain" in cand:
@@ -209,7 +210,8 @@ def run(
             result_evo["name"] = cand["name"] + "_evo"
             if "chain" in cand:
                 result_evo["chain"] = cand["chain"]
-            results.append(result_evo)    print(f"\n[Stage 5] Exporting AF3 job JSONs to {cfg.output_dir}/...")
+            results.append(result_evo)    
+            print(f"\n[Stage 5] Exporting AF3 job JSONs to {cfg.output_dir}/...")
     exported = 0
     for r in results:
         job = make_af3_job(r["attacked_seq"], r["name"])
