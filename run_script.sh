@@ -7,7 +7,7 @@
 #SBATCH --gpus=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=20G
+#SBATCH --mem=40G
 #SBATCH --time=0-01:10:00
 #SBATCH --exclude=serv-3338
 
