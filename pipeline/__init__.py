@@ -20,6 +20,7 @@ from .trick_sequences import (
 from .protgpt2 import ProtGPT2Generator
 from .esmfold import ESMFoldScorer
 from .inverse_fold import InverseFoldingModule, BLOSUMAttack
+from .evolutionary_attack import EvolutionaryAttack
 
 __all__ = [
     "PipelineConfig",
@@ -32,6 +33,7 @@ __all__ = [
     "ProtGPT2Generator",
     "ESMFoldScorer",
     "InverseFoldingModule",
+        "EvolutionaryAttack",
     "BLOSUMAttack",
     "EvolutionaryAttack",
 ]
