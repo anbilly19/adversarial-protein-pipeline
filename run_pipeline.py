@@ -18,6 +18,38 @@ Usage:
     python run_pipeline.py --complex --pdb 7k3g.pdb --chains A,B
 """
 
+# ---------------------------------------------------------------------------
+# torch_scatter compatibility shim
+# ---------------------------------------------------------------------------
+# torch_scatter's compiled CUDA extension requires GLIBC_2.32+ and has no
+# prebuilt wheels for Python 3.13. If the real package fails to load, we
+# inject a pure-PyTorch drop-in for the two ops ESM-IF1 actually uses
+# (scatter_add, scatter). This runs before any ESM imports.
+import sys
+import types
+import torch as _torch
+
+try:
+    import torch_scatter as _ts_check  # noqa: F401 -- just test the import
+except OSError:
+    def _scatter_add(src, index, dim=0, out=None, dim_size=None):
+        if out is None:
+            size = list(src.shape)
+            size[dim] = dim_size if dim_size is not None else int(index.max()) + 1
+            out = src.new_zeros(size)
+        return out.scatter_add_(dim, index.expand_as(src), src)
+
+    def _scatter(src, index, dim=0, out=None, dim_size=None, reduce="sum"):
+        return _scatter_add(src, index, dim=dim, out=out, dim_size=dim_size)
+
+    _ts = types.ModuleType("torch_scatter")
+    _ts.scatter_add = _scatter_add
+    _ts.scatter = _scatter
+    sys.modules["torch_scatter"] = _ts
+    print("[torch_scatter] CUDA extension unavailable — using pure-PyTorch fallback")
+
+# ---------------------------------------------------------------------------
+
 import argparse
 import json
 import os
