@@ -1,31 +1,21 @@
 """BLOSUM62 adversarial mutations (gradient-free).
 
-InverseFoldingModule (ESM-IF1) has been removed — it required GPU,
-biotite, and torch_scatter. This module now only exposes BLOSUMAttack
-with its random and exhaustive mutation strategies. Position ranking
-is done externally via ESM2OracleScorer.position_sensitivity().
-
-Reference:
-    Alkhouri et al. 2024 (gradient-guided BLOSUM attack — we adapt
-    to gradient-free sensitivity proxy from ESM-2 OFS surprisal)
+BLOSUMAttack now respects the same 20% mutation budget as DEAttacker
+via resolve_budget(), so seed candidates generated here are consistent
+with the DE search space.
 """
 
 from typing import List, Dict, Optional
 import numpy as np
 
-from .config import PipelineConfig
+from .config import PipelineConfig, resolve_budget
 from .trick_sequences import BLOSUM62_SIMILAR
 
 
 class BLOSUMAttack:
     """BLOSUM62-conservative adversarial mutations.
 
-    Two strategies:
-        random:    pick n_mutations random substitutable positions
-        exhaustive: all possible single conservative point mutations
-
-    Position ranking (previously done by gradient_sensitivity) is now
-    provided externally as a surprisal list from ESM2OracleScorer.
+    All methods respect the 20% mutation budget via resolve_budget().
     """
 
     def __init__(self, cfg: PipelineConfig):
@@ -38,8 +28,10 @@ class BLOSUMAttack:
         n_variants: int = None,
         seed: Optional[int] = None,
     ) -> List[str]:
-        """Generate n_variants by applying n_mutations random BLOSUM62 substitutions."""
-        n_mutations = n_mutations or self.cfg.n_mutations
+        """Generate n_variants by applying up to 20%-capped random BLOSUM62 substitutions."""
+        b = resolve_budget(self.cfg, len(seq)) if n_mutations is None else min(
+            n_mutations, resolve_budget(self.cfg, len(seq))
+        )
         n_variants = n_variants or self.cfg.n_blosum_variants
         rng = np.random.default_rng(seed)
 
@@ -50,7 +42,7 @@ class BLOSUMAttack:
         for _ in range(n_variants):
             mutant = seq_list.copy()
             positions = rng.choice(
-                mutable, size=min(n_mutations, len(mutable)), replace=False
+                mutable, size=min(b, len(mutable)), replace=False
             )
             for pos in positions:
                 aa = mutant[pos]
@@ -66,23 +58,21 @@ class BLOSUMAttack:
         n_variants: int = None,
         seed: Optional[int] = None,
     ) -> List[str]:
-        """Apply BLOSUM62 mutations at positions with highest ESM-2 surprisal.
+        """Apply BLOSUM62 mutations at highest ESM-2 surprisal positions.
 
-        Replaces gradient_guided_mutations: position importance is derived
-        from ESM2OracleScorer.position_sensitivity() (OFS surprisal), which
-        is a forward-only CPU operation instead of gradient backpropagation.
+        Budget b = floor(20% * L), so at most 20% of residues are changed.
+        Position importance from ESM2OracleScorer.position_sensitivity() (OFS surprisal).
 
         Args:
             seq:        Amino acid sequence string
-            surprisals: Per-position surprisal list from ESM2OracleScorer.position_sensitivity()
-            n_mutations: Number of positions to mutate
+            surprisals: Per-position surprisal list from ESM2OracleScorer
+            n_mutations: Override budget (still capped at 20%)
             n_variants:  Number of variant sequences to generate
             seed:        Random seed
-
-        Returns:
-            List of mutant sequences
         """
-        n_mutations = n_mutations or self.cfg.n_mutations
+        b = resolve_budget(self.cfg, len(seq)) if n_mutations is None else min(
+            n_mutations, resolve_budget(self.cfg, len(seq))
+        )
         n_variants = n_variants or self.cfg.n_blosum_variants
         rng = np.random.default_rng(seed)
 
@@ -90,11 +80,12 @@ class BLOSUMAttack:
         ranked = np.argsort(surprisals)[::-1]
         top_positions = [
             pos for pos in ranked if seq_list[pos] in BLOSUM62_SIMILAR
-        ][:n_mutations]
+        ][:b]
 
         print(
-            f"[BLOSUM] Top {len(top_positions)} high-surprisal positions: "
-            f"{top_positions} | surprisal: {[round(surprisals[p], 3) for p in top_positions]}"
+            f"[BLOSUM] b={b} sites ({b/len(seq)*100:.1f}% of chain) | "
+            f"top positions: {top_positions[:10]}{'...' if len(top_positions)>10 else ''} | "
+            f"surprisal: {[round(surprisals[p], 3) for p in top_positions[:5]]}"
         )
 
         variants = []
