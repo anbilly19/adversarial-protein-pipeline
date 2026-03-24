@@ -17,11 +17,16 @@ Usage:
     python run_pipeline.py --complex --pdb 7k3g.pdb
     python run_pipeline.py --complex --pdb 7k3g.pdb --chains A,B
 
+    # Explicit device override
+    python run_pipeline.py --pdb rfah.pdb --device cuda
+    python run_pipeline.py --pdb rfah.pdb --device cpu
+
 Changes from stable-gradient-attack branch:
     - ESMFold / ESM-IF1 / ESM-Design gradient attack removed entirely
-    - Replaced by ESM-2 OFS pseudo-perplexity oracle (CPU, ~7 ms/seq)
+    - Replaced by ESM-2 OFS pseudo-perplexity oracle (GPU optional, CPU fine)
     - Differential Evolution (DE/rand/1/bin) replaces gradient-guided attack
-    - No GPU required; no torch_scatter; no biotite
+    - No torch_scatter; no biotite; no backpropagation
+    - --device flag restored: auto-detects cuda, can be overridden
     - AF3 JSON export unchanged
 """
 
@@ -147,20 +152,11 @@ def run(
     Stage 3: Score all candidates with ESM-2 OFS PPL
     Stage 4: DE attack on top-k candidates
     Stage 5: Export AF3 JSON files
-
-    Args:
-        cfg:         PipelineConfig
-        pdb_path:    Optional path to PDB file
-        chain_id:    Chain to use from PDB
-        use_tricks:  Whether to include trick sequences
-        n_generated: Override cfg.n_generated
-
-    Returns:
-        List of result dicts with attack outcomes
     """
     os.makedirs(cfg.output_dir, exist_ok=True)
     all_candidates: List[Dict] = []
 
+    print(f"[Device] Using: {cfg.device}")
     scorer = ESM2OracleScorer(cfg)
 
     # -- Stage 0: Trick sequences --------------------------------------------
@@ -171,6 +167,7 @@ def run(
 
     # -- Stage 1: Native sequence + BLOSUM seed variants from PDB ------------
     native_seq = None
+    surprisals = None
     if pdb_path:
         print(f"[Stage 1] Reading native sequence from {pdb_path} (chain={chain_id})")
         chain_seqs = read_pdb_sequences(pdb_path)
@@ -182,7 +179,6 @@ def run(
         native_seq = chain_seqs[chain_id]
         print(f"  -> Native sequence length: {len(native_seq)}")
 
-        # Use ESM-2 OFS surprisal for position sensitivity (replaces gradient)
         print("  -> Computing position surprisal (ESM-2 OFS) for native sequence...")
         surprisals = scorer.position_sensitivity(native_seq)
 
@@ -220,7 +216,6 @@ def run(
     for cand, score in zip(all_candidates, ppl_scores):
         cand["init_ppl"] = score
 
-    # Sort descending: highest PPL = most unusual = best adversarial seeds
     all_candidates.sort(key=lambda x: x["init_ppl"], reverse=True)
     print("  Top 5 candidates before DE attack:")
     for c in all_candidates[:5]:
@@ -234,10 +229,7 @@ def run(
             f"\n  Attacking [{cand['source']}] {cand['name']} "
             f"(len={len(cand['seq'])}, init_PPL={cand['init_ppl']:.2f})"
         )
-        # Reuse per-candidate sensitivity if native_seq is available
-        sens = None
-        if native_seq and cand["seq"] == native_seq:
-            sens = surprisals
+        sens = surprisals if (native_seq and cand["seq"] == native_seq) else None
         de = DEAttacker(cfg, scorer, sensitivity=sens)
         result = de.attack(cand["seq"])
         result["source"] = cand["source"]
@@ -276,16 +268,11 @@ def run_complex_attack(
     """Adversarial attack mode for protein complexes.
 
     Attacks each chain independently using DE + ESM-2 OFS PPL.
-    No ESM-IF1, no GPU, no torch_scatter required.
-
-    Pipeline per chain:
-        1. Read native sequence from PDB
-        2. ESM-2 position surprisal -> BLOSUM sensitivity-guided seeds
-        3. ESM-2 OFS PPL scoring of all candidates
-        4. DE attack on top-k per chain
-        5. Export one AF3 JSON per chain + combined multi-chain JSON
+    No ESM-IF1, no torch_scatter, no backpropagation required.
+    GPU accelerates ESM-2 OFS scoring if available.
     """
     os.makedirs(cfg.output_dir, exist_ok=True)
+    print(f"[Device] Using: {cfg.device}")
     scorer = ESM2OracleScorer(cfg)
     blosum = BLOSUMAttack(cfg)
 
@@ -324,7 +311,6 @@ def run_complex_attack(
             for i, s in enumerate(mutants)
         ]
 
-        # Score candidates
         print(f"  Scoring {len(candidates)} candidates with ESM-2 OFS PPL...")
         seqs = [c["seq"] for c in candidates]
         scores = scorer.score_batch(seqs)
@@ -334,7 +320,6 @@ def run_complex_attack(
 
         print(f"  Top candidate: {candidates[0]['name']} PPL={candidates[0]['init_ppl']:.2f}")
 
-        # DE attack on top-k
         results = []
         for cand in candidates[:cfg.top_k_attack]:
             print(
@@ -436,6 +421,9 @@ def parse_args():
     parser.add_argument("--de-gen", type=int, default=6, help="DE number of generations")
     parser.add_argument("--output-dir", type=str, default="af3_attack_jobs",
                         help="Output directory for AF3 JSON files")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Device for ESM-2 oracle and ProtGPT2: cuda or cpu "
+                             "(default: auto-detect cuda, fallback cpu)")
     parser.add_argument("--esm2-model", type=str, default=None,
                         help="ESM-2 model name or local path (default: facebook/esm2_t6_8M_UR50D)")
     parser.add_argument("--protgpt2-path", type=str, default=None,
@@ -472,6 +460,9 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         **cfg_kwargs,
     )
+    # Override device if explicitly passed, otherwise keep auto-detected default
+    if args.device:
+        cfg.device = args.device
 
     if args.complex:
         if not args.pdb:

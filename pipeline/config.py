@@ -1,17 +1,19 @@
 """PipelineConfig: all hyperparameters for the gradient-free DE pipeline.
 
-No GPU required. ESM-2 8M runs comfortably on CPU (~7 ms / sequence).
+GPU is optional but accelerates ESM-2 OFS scoring and ProtGPT2 generation.
+Defaults to CUDA if available, falls back to CPU automatically.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import os
+import torch
 
 
 @dataclass
 class PipelineConfig:
-    # ── ESM-2 oracle (CPU, forward-pass only) ───────────────────────────
+    # ── ESM-2 oracle (forward-pass only — no backprop) ─────────────────
     esm2_model_name: str = os.environ.get(
         "ESM2_MODEL_NAME", "facebook/esm2_t6_8M_UR50D"
-    )  # 8 M params, ~35 MB, runs on CPU in ~7 ms/seq
+    )  # 8 M params ~35 MB; swap for esm2_t12_35M_UR50D for stronger oracle
 
     # ── ProtGPT2 generation ──────────────────────────────────────────────
     protgpt2_model_path: str = os.environ.get("PROTGPT2_MODEL_PATH", "nferruz/ProtGPT2")
@@ -21,8 +23,8 @@ class PipelineConfig:
     rep_penalty: float = 1.2
     perplexity_threshold: float = 15.0
 
-    # ── BLOSUM random mutations (seed candidates) ────────────────────────
-    n_mutations: int = 3        # DE budget b (mutations per individual)
+    # ── BLOSUM seed candidates ────────────────────────────────────────────
+    n_mutations: int = 3        # DE budget b: mutations per individual
     n_blosum_variants: int = 10
 
     # ── Differential Evolution ───────────────────────────────────────────
@@ -34,8 +36,9 @@ class PipelineConfig:
 
     # ── Attack target ────────────────────────────────────────────────────
     ppl_target: float = 25.0    # adversarial success: PPL >= this threshold
-    top_k_attack: int = 5       # number of seed candidates to attack
+    top_k_attack: int = 5
 
     # ── General ──────────────────────────────────────────────────────────
     output_dir: str = "af3_attack_jobs"
-    device: str = "cpu"         # intentionally CPU-only
+    # Auto-detect: cuda if available, else cpu. Override with --device.
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
