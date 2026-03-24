@@ -115,7 +115,7 @@ def run(
     # -- Stage 1: Inverse folding + BLOSUM mutations from PDB --------------------
     esm_scorer = ESMFoldScorer(cfg)
     if pdb_path:  # Extract sequences from PDB (all chains)        print(f"[Stage 1] Inverse folding from {pdb_path} ({chain_info})...")
-                from Bio.PDB import PDBParser
+        from Bio.PDB import PDBParser
         parser = PDBParser(QUIET=True)
         structure = parser.get_structure('protein', pdb_path)
         
@@ -219,10 +219,10 @@ def run(
                 result["chain"] = cand["chain"]
                 results.append(result)        
         elif False:  # DISABLED: both attacks            # Run gradient attack
-                result_grad = esm_scorer.esm_design_attack(cand["seq"])
+            result_grad = esm_scorer.esm_design_attack(cand["seq"])
             result_grad["source"] = cand["source"]
         elif False:  # DISABLED: both attacks (use evolutionary only)            if "chain" in cand:
-                result_grad["chain"] = cand["chain"]
+            result_grad["chain"] = cand["chain"]
             results.append(result_grad)
             # Run evolutionary attack
             evo_attack = EvolutionaryAttack(cfg, esm_scorer)
