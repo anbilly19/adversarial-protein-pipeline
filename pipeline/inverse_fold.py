@@ -23,6 +23,25 @@ from .config import PipelineConfig
 from .trick_sequences import BLOSUM62_SIMILAR, AA_TO_IDX
 
 
+def _get_chain_ids(pdb_path: str) -> List[str]:
+    """Extract unique chain IDs from a PDB file using ESM's structure loader.
+
+    Uses the biotite AtomArray returned by esm.inverse_folding.util.load_structure.
+    Chain order matches the order of first appearance in the PDB file.
+
+    Args:
+        pdb_path: Path to .pdb or .cif file
+
+    Returns:
+        Ordered list of unique chain ID strings
+    """
+    import esm.inverse_folding.util as ifutil
+    structure = ifutil.load_structure(pdb_path)
+    # dict.fromkeys preserves insertion order and deduplicates
+    chain_ids = list(dict.fromkeys(structure.chain_id.tolist()))
+    return chain_ids
+
+
 class InverseFoldingModule:
     """ESM-IF1 inverse folding: structure -> sequences."""
 
@@ -35,7 +54,6 @@ class InverseFoldingModule:
         """Lazy-load ESM-IF1 (requires fair-esm package)."""
         if self._model is None:
             try:
-                
                 if self.cfg.esm_if1_checkpoint:
                     print(f"[ESM-IF1] Loading from local checkpoint: {self.cfg.esm_if1_checkpoint}")
                     self._model, self._alphabet = esm.pretrained.load_model_and_alphabet_core(
@@ -45,8 +63,8 @@ class InverseFoldingModule:
                 else:
                     print("[ESM-IF1] No local checkpoint set, downloading from HuggingFace...")
                     self._model, self._alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
-                    self._model = self._model.eval().to(self.cfg.device)
-                    print("[ESM-IF1] Model loaded")
+                self._model = self._model.eval().to(self.cfg.device)
+                print("[ESM-IF1] Model loaded")
             except ImportError:
                 raise ImportError(
                     "fair-esm is required for inverse folding. "
@@ -75,7 +93,6 @@ class InverseFoldingModule:
         Returns:
             List of candidate dicts sorted by log-likelihood descending
         """
-        
         self._load()
 
         n_sequences = n_sequences or self.cfg.n_if_sequences
@@ -90,7 +107,6 @@ class InverseFoldingModule:
 
         results = []
         for i in range(n_sequences):
-            
             with torch.no_grad():
                 sampled_seq = self._model.sample(
                     coords, temperature=temperature, device=self.cfg.device
@@ -112,6 +128,47 @@ class InverseFoldingModule:
 
         results.sort(key=lambda x: x["log_likelihood"], reverse=True)
         return results
+
+    def from_pdb_all_chains(
+        self,
+        pdb_path: str,
+        chain_ids: List[str] = None,
+        n_sequences: int = None,
+        temperature: float = None,
+    ) -> Dict[str, List[Dict]]:
+        """Run inverse folding on every chain of a protein complex independently.
+
+        Each chain is treated as an independent single-chain inverse folding
+        problem. ESM-IF1 cannot model inter-chain interactions, so chains are
+        sampled separately and later reassembled into a multi-chain AF3 job.
+
+        Args:
+            pdb_path: Path to PDB/CIF file of the complex
+            chain_ids: Explicit list of chain IDs to process.
+                       If None, all chains are auto-detected from the file.
+            n_sequences: IF samples per chain (default: cfg.n_if_sequences_per_chain)
+            temperature: Sampling temperature (default: cfg.if_temperature)
+
+        Returns:
+            Dict mapping chain_id -> list of candidate dicts (same schema as from_pdb)
+        """
+        self._load()
+        n_sequences = n_sequences or self.cfg.n_if_sequences_per_chain
+        temperature = temperature or self.cfg.if_temperature
+
+        if chain_ids is None:
+            chain_ids = _get_chain_ids(pdb_path)
+            print(f"[ESM-IF1] Auto-detected chains: {chain_ids}")
+        else:
+            print(f"[ESM-IF1] Using specified chains: {chain_ids}")
+
+        results_per_chain: Dict[str, List[Dict]] = {}
+        for chain_id in chain_ids:
+            print(f"\n[ESM-IF1] Processing chain {chain_id}...")
+            candidates = self.from_pdb(pdb_path, chain_id, n_sequences, temperature)
+            results_per_chain[chain_id] = candidates
+
+        return results_per_chain
 
 
 class BLOSUMAttack:
@@ -140,7 +197,6 @@ class BLOSUMAttack:
 
         variants = []
         seq_list = list(seq)
-        # Only mutate positions that have valid BLOSUM substitutes
         mutable = [i for i, aa in enumerate(seq_list) if aa in BLOSUM62_SIMILAR]
 
         for _ in range(n_variants):
@@ -183,9 +239,7 @@ class BLOSUMAttack:
         rng = np.random.default_rng(seed)
 
         seq_list = list(seq)
-        # Rank positions by gradient magnitude (descending)
         ranked = np.argsort(grad_magnitude)[::-1]
-        # Filter to mutable positions (have BLOSUM substitutes)
         top_positions = [
             pos for pos in ranked if seq_list[pos] in BLOSUM62_SIMILAR
         ][:n_mutations]
