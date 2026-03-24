@@ -32,6 +32,10 @@ class PipelineConfig:
     n_if_sequences: int = 20
     if_temperature: float = 1.5
 
+    # Protein complex mode
+    complex_chains: list = None          # e.g. ["A", "B", "C"] — None means auto-detect
+    n_if_sequences_per_chain: int = 10   # IF samples per chain (keep lower for complexes)
+
     # General
     batch_size: int = 4
     top_k_attack: int = 5

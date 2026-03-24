@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+from html import parser
 import json
 import os
 from typing import List, Dict
@@ -75,6 +76,137 @@ def print_summary(results: List[Dict], cfg: PipelineConfig) -> None:
         )
     print("=" * 72)
 
+def run_complex_attack(
+    cfg: PipelineConfig,
+    pdb_path: str,
+    chain_ids: list = None,          # None = auto-detect
+) -> Dict[str, List[Dict]]:
+    """
+    Adversarial attack mode for protein complexes.
+
+    For each chain independently:
+        1. ESM-IF1 inverse folding (n_if_sequences_per_chain samples)
+        2. Gradient-guided BLOSUM mutations on native chain sequence
+        3. ESMFold batch scoring of candidates
+        4. ESM-Design gradient attack on top-k per chain
+        5. Export a single multi-chain AF3 JSON per attack combination
+
+    Args:
+        cfg: PipelineConfig
+        pdb_path: Path to PDB/CIF of the complex
+        chain_ids: Specific chains to attack; None = all chains
+
+    Returns:
+        Dict mapping chain_id -> list of attack result dicts
+    """
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    esm_scorer = ESMFoldScorer(cfg)
+    if_module = InverseFoldingModule(cfg)
+    blosum = BLOSUMAttack(cfg)
+
+    # Stage 1: per-chain inverse folding
+    if_results = if_module.from_pdb_all_chains(pdb_path, chain_ids)
+    all_chain_ids = list(if_results.keys())
+
+    chain_attacked_seqs = {}   # chain_id -> best attacked sequence
+    chain_results = {}
+
+    for chain_id, if_candidates in if_results.items():
+        print(f"\n{'='*60}")
+        print(f"[Complex] Attacking chain {chain_id} ({len(if_candidates)} IF seeds)")
+        print(f"{'='*60}")
+
+        # Gradient-guided BLOSUM mutations on native sequence
+        native_seq = if_candidates[0]["native_seq"]
+        grad_mag = esm_scorer.gradient_sensitivity(native_seq)
+        mutants = blosum.gradient_guided_mutations(
+            native_seq, grad_mag,
+            n_mutations=cfg.n_mutations,
+            n_variants=cfg.n_blosum_variants,
+        )
+        blosum_cands = [
+            {"seq": s, "name": f"chain{chain_id}_blosum_{i:02d}",
+             "source": "blosum_adversarial"}
+            for i, s in enumerate(mutants)
+        ]
+
+        candidates = list(if_candidates) + blosum_cands
+
+        # Score all candidates with ESMFold
+        seqs = [c["seq"] for c in candidates]
+        scores = esm_scorer.score_batch(seqs)
+        for cand, score in zip(candidates, scores):
+            cand["init_plddt"] = score
+        candidates.sort(key=lambda x: x["init_plddt"], reverse=True)
+
+        print(f"  Top candidate before attack: {candidates[0]['name']} "
+              f"pLDDT={candidates[0]['init_plddt']:.1f}")
+
+        # ESM-Design gradient attack on top-k
+        results = []
+        for cand in candidates[:cfg.top_k_attack]:
+            print(f"\n  Attacking {cand['name']} "
+                  f"(len={len(cand['seq'])}, pLDDT={cand['init_plddt']:.1f})")
+            result = esm_scorer.esm_design_attack(cand["seq"])
+            result["source"] = cand["source"]
+            result["name"] = cand["name"]
+            result["chain_id"] = chain_id
+            results.append(result)
+
+        chain_results[chain_id] = results
+
+        # Best attacked sequence for this chain = highest final pLDDT
+        best = max(results, key=lambda r: r["final_plddt"])
+        chain_attacked_seqs[chain_id] = best["attacked_seq"]
+        print(f"  [chain {chain_id}] best pLDDT: {best['orig_plddt']:.1f} "
+              f"-> {best['final_plddt']:.1f}")
+
+    # Export a single multi-chain AF3 JSON with all attacked chains
+    _export_complex_af3_job(chain_attacked_seqs, all_chain_ids, cfg)
+    _print_complex_summary(chain_results, cfg)
+
+    return chain_results
+
+def _export_complex_af3_job(
+    chain_seqs: Dict[str, str],
+    chain_order: list,
+    cfg: PipelineConfig,
+    seed: int = 42,
+) -> None:
+    """Write one AF3 JSON with all attacked chains as separate proteinChain entries."""
+    sequences = [
+        {"proteinChain": {"sequence": chain_seqs[c], "count": 1}}
+        for c in chain_order
+    ]
+    job = [{
+        "name": "complex_attack_" + "_".join(chain_order),
+        "modelSeeds": [seed],
+        "sequences": sequences,
+        "dialect": "alphafoldserver",
+        "version": 1,
+    }]
+    fname = os.path.join(cfg.output_dir, f"complex_{''.join(chain_order)}_attacked.json")
+    with open(fname, "w") as f:
+        json.dump(job, f, indent=2)
+    print(f"\n[Complex] Multi-chain AF3 job written -> {fname}")
+
+
+def _print_complex_summary(
+    chain_results: Dict[str, List[Dict]],
+    cfg: PipelineConfig,
+) -> None:
+    print("\n" + "=" * 72)
+    print("COMPLEX ATTACK SUMMARY")
+    print("-" * 72)
+    print(f"{'Chain':<8} {'Source':<22} {'Name':<24} {'Init':>6} {'Final':>6} {'Delta':>6} OK")
+    print("-" * 72)
+    for chain_id, results in chain_results.items():
+        for r in sorted(results, key=lambda x: x["final_plddt"], reverse=True):
+            delta = r["final_plddt"] - r["orig_plddt"]
+            ok = "v" if r.get("attack_success") else "x"
+            print(f"{chain_id:<8} {r.get('source','?'):<22} {r.get('name','?'):<24} "
+                  f"{r['orig_plddt']:>6.1f} {r['final_plddt']:>6.1f} {delta:>+6.1f} {ok}")
+    print("=" * 72)
 
 def run(
     cfg: PipelineConfig,
@@ -220,6 +352,10 @@ def parse_args():
                         help="Device: cuda or cpu (auto-detect if not set)")
     parser.add_argument("--esmfold-path", type=str, default=None,
                         help="Local path to pre-downloaded ESMFold weights")
+    parser.add_argument("--complex", action="store_true",
+                    help="Attack all chains of a protein complex (requires --pdb)")
+    parser.add_argument("--chains", type=str, default=None,
+                    help="Comma-separated chain IDs e.g. 'A,B,C' (default: auto-detect all)")
     parser.add_argument("--protgpt2-path", type=str, default=None,
                         help="Local path to pre-downloaded ProtGPT2 weights")
     parser.add_argument("--esm-if1-checkpoint", type=str, default=None,
@@ -243,23 +379,12 @@ if __name__ == "__main__":
     if args.device:
         cfg.device = args.device
 
-    n_generated = 0 if args.tricks_only else args.n_generated
-    results = run(
-        cfg=cfg,
-        pdb_path=args.pdb,
-        chain_id=args.chain,
-        use_tricks=args.use_tricks,
-        n_generated=n_generated,
-    )
-
-    # Re-export with user-specified seed if different from default
-    if args.af3_seed != 42:
-        print(f"\n[Re-export] Writing AF3 JSONs with seed={args.af3_seed}...")
-        for r in results:
-            job = make_af3_job(r["attacked_seq"], r["name"], seed=args.af3_seed)
-            fname = os.path.join(
-                cfg.output_dir,
-                f"{r['name']}_plddt{r['final_plddt']:.0f}.json"
-            )
-            with open(fname, "w") as f:
-                json.dump(job, f, indent=2)
+    if args.complex:
+        if not args.pdb:
+            parser.error("--complex requires --pdb")
+        chain_ids = [c.strip() for c in args.chains.split(",")] if args.chains else None
+        run_complex_attack(cfg=cfg, pdb_path=args.pdb, chain_ids=chain_ids)
+    else:
+        n_generated = 0 if args.tricks_only else args.n_generated
+        results = run(cfg=cfg, pdb_path=args.pdb, chain_id=args.chain,
+                    use_tricks=args.use_tricks, n_generated=n_generated)

@@ -112,6 +112,53 @@ class InverseFoldingModule:
 
         results.sort(key=lambda x: x["log_likelihood"], reverse=True)
         return results
+    
+    def from_pdb_all_chains(
+        self,
+        pdb_path: str,
+        chain_ids: list = None,          # None = auto-detect all chains
+        n_sequences: int = None,
+        temperature: float = None,
+    ) -> Dict[str, List[Dict]]:
+        """
+        Run inverse folding on every chain of a protein complex independently.
+
+        Args:
+            pdb_path: Path to PDB file
+            chain_ids: Explicit list of chain IDs; if None, auto-detect from structure
+            n_sequences: IF samples per chain
+            temperature: Sampling temperature
+
+        Returns:
+            Dict mapping chain_id -> list of candidate dicts (same schema as from_pdb)
+        """
+        self._load()
+        n_sequences = n_sequences or self.cfg.n_if_sequences_per_chain
+        temperature = temperature or self.cfg.if_temperature
+
+        # Auto-detect chains using biotite or biopython
+        if chain_ids is None:
+            chain_ids = _get_chain_ids(pdb_path)
+            print(f"[ESM-IF1] Auto-detected chains: {chain_ids}")
+
+        results_per_chain = {}
+        for chain_id in chain_ids:
+            print(f"\n[ESM-IF1] Processing chain {chain_id}...")
+            candidates = self.from_pdb(pdb_path, chain_id, n_sequences, temperature)
+            results_per_chain[chain_id] = candidates
+
+        return results_per_chain
+    
+def _get_chain_ids(pdb_path: str) -> list:
+    """Extract unique chain IDs from a PDB file using ESM's structure loader."""
+    import esm.inverse_folding.util as ifutil
+    # load_structure returns a biotite AtomArray
+    structure = ifutil.load_structure(pdb_path)
+    # biotite stores chain IDs in the chain_id attribute
+    chain_ids = list(dict.fromkeys(structure.chain_id.tolist()))
+    return chain_ids
+
+
 
 
 class BLOSUMAttack:
