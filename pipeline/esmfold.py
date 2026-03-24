@@ -42,7 +42,6 @@ class ESMFoldScorer:
         model_path = cfg.esmfold_model_path
         local = "/" in model_path
         print(f"[ESMFold] Loading from {'local path' if local else 'HuggingFace'}: {model_path}...")
-        # EsmTokenizer uses a fixed amino acid vocabulary - no protobuf needed.
         try:
             self.tokenizer = EsmTokenizer.from_pretrained(
                 model_path, local_files_only=local
@@ -58,12 +57,22 @@ class ESMFoldScorer:
         self.model.eval()
         # fp16 ESM-2 backbone to save VRAM
         self.model.esm = self.model.esm.half()
-        # Chunk attention for long sequences
-        self.model.trunk.set_chunk_size(64)
+        # Small chunk size reduces peak activation memory during both
+        # inference and gradient-attack backward passes.
+        self.model.trunk.set_chunk_size(4)
         print(f"[ESMFold] Ready on {cfg.device}")
 
     # ------------------------------------------------------------------
-    # Scoring
+    # Internal helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _empty_cache():
+        """Free all unused CUDA memory back to the allocator."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # ------------------------------------------------------------------
+    # Scoring  (all inference — full no_grad)
     # ------------------------------------------------------------------
     def score(self, seq: str) -> float:
         """Return mean pLDDT (0-100) for a single sequence."""
@@ -72,7 +81,9 @@ class ESMFoldScorer:
         ).to(self.cfg.device)
         with torch.no_grad():
             out = self.model(**tokens)
-        return out["plddt"][0].mean().item() * 100
+        score = out["plddt"][0].mean().item() * 100
+        self._empty_cache()
+        return score
 
     def score_batch(self, seqs: List[str]) -> List[float]:
         """Batch scoring. Sequences are padded to the same length within each batch."""
@@ -87,6 +98,7 @@ class ESMFoldScorer:
                 out = self.model(**tokens)
             for j, seq in enumerate(batch):
                 scores.append(out["plddt"][j, : len(seq)].mean().item() * 100)
+            self._empty_cache()
         return scores
 
     def score_with_pae(self, seq: str) -> Dict:
@@ -96,15 +108,17 @@ class ESMFoldScorer:
         ).to(self.cfg.device)
         with torch.no_grad():
             out = self.model(**tokens)
-        return {
+        result = {
             "plddt": out["plddt"][0].cpu().numpy() * 100,
             "pae": out["predicted_aligned_error"][0].cpu().numpy(),
             "mean_plddt": out["plddt"][0].mean().item() * 100,
             "ptm": out.get("ptm", torch.tensor(0.0)).item(),
         }
+        self._empty_cache()
+        return result
 
     # ------------------------------------------------------------------
-    # ESM-Design Adversarial Attack (corrected injection point)
+    # ESM-Design Adversarial Attack
     # ------------------------------------------------------------------
     def _seq_to_logits(self, seq: str) -> torch.Tensor:
         """Convert AA string to sharp initial logits over 20 AA classes [L, 20]."""
@@ -119,78 +133,60 @@ class ESMFoldScorer:
     def _soft_embed_to_esm_hidden(self, soft_tokens: torch.Tensor) -> torch.Tensor:
         """Map soft [L, 20] token distribution -> ESM-2 word embeddings [1, L+2, D].
 
-        Injects a soft weighted combination of the 20 AA token embeddings
-        directly into the ESM-2 embedding layer, replacing the discrete lookup.
-        Prepends CLS and appends EOS to match the ESM-2 expected input format.
-
-        Args:
-            soft_tokens: [L, 20] Gumbel-softmax output
-        Returns:
-            [1, L+2, esm_feats] float tensor with CLS prepended and EOS appended
+        Soft weighted combination of the 20 AA token embeddings injected directly
+        into the ESM-2 embedding layer, replacing the discrete lookup.
+        CLS and EOS are prepended/appended under no_grad (they carry no gradient).
         """
         embed_w = self.model.esm.embeddings.word_embeddings.weight  # [vocab, D]
-        # The 20 standard AA embeddings at indices 6..25
-        aa_embeds = embed_w[_ESM_AA_START:_ESM_AA_END].float()  # [20, D]
-        seq_embed = soft_tokens @ aa_embeds  # [L, D]
+        aa_embeds = embed_w[_ESM_AA_START:_ESM_AA_END].float()      # [20, D]
+        seq_embed = soft_tokens @ aa_embeds                          # [L, D]
 
-        cls_embed = embed_w[self.model.esm_dict_cls_idx].float().unsqueeze(0)  # [1, D]
-        eos_embed = embed_w[self.model.esm_dict_eos_idx].float().unsqueeze(0)  # [1, D]
-        # [1, L+2, D]
+        with torch.no_grad():
+            cls_embed = embed_w[self.model.esm_dict_cls_idx].float().unsqueeze(0)
+            eos_embed = embed_w[self.model.esm_dict_eos_idx].float().unsqueeze(0)
+
         full_embed = torch.cat([cls_embed, seq_embed, eos_embed], dim=0).unsqueeze(0)
-        return full_embed
+        return full_embed  # [1, L+2, D]
 
     def _forward_from_esm_embed(
         self, full_embed: torch.Tensor, L: int
     ) -> torch.Tensor:
         """Run the full ESMFold pipeline from pre-computed ESM-2 embeddings.
 
-        Bypasses the ESM-2 token lookup and feeds embeddings directly through
-        the ESM-2 transformer, then through esm_s_mlp and the folding trunk.
-        Returns per-residue pLDDT [L].
+        Only the ESM-2 transformer and folding trunk need gradients.
+        All auxiliary tensor construction (masks, position ids, pair features)
+        runs under no_grad to avoid retaining unnecessary activations.
 
-        This correctly matches EsmForProteinFolding.forward() which calls:
-            esm hidden states -> esm_s_mlp -> trunk(seq_feats, pair_feats, aa, pos_ids, mask)
+        Returns per-residue pLDDT [L].
         """
         B = 1
         device = self.cfg.device
 
-        # Build attention mask: all 1s (CLS + L residues + EOS)
-        attn_mask = torch.ones(B, L + 2, device=device, dtype=torch.bool)
+        with torch.no_grad():
+            attn_mask = torch.ones(B, L + 2, device=device, dtype=torch.bool)
 
-        # Run ESM-2 transformer with injected embeddings
-        # We use inputs_embeds to bypass the token embedding lookup
         esm_out = self.model.esm(
-            inputs_embeds=full_embed.half(),  # ESM-2 runs in fp16
+            inputs_embeds=full_embed.half(),
             attention_mask=attn_mask,
             output_hidden_states=True,
         )
-        # Stack all hidden states: [B, L+2, n_layers+1, D]
-        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)  # [B, L+2, n_layers+1, D]
-        esm_s = esm_hidden[:, 1:-1]  # strip CLS/EOS: [B, L, n_layers+1, D]
-
-        # Project to trunk sequence features
+        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)  # [B, L+2, layers+1, D]
+        esm_s = esm_hidden[:, 1:-1]                                 # [B, L, layers+1, D]
         esm_s = esm_s.to(self.model.esm_s_combine.dtype)
-        esm_s = (self.model.esm_s_combine.softmax(0).unsqueeze(0) @ esm_s).squeeze(2)  # [B, L, D_esm]
-        s_s_0 = self.model.esm_s_mlp(esm_s)  # [B, L, c_s]
+        esm_s = (self.model.esm_s_combine.softmax(0).unsqueeze(0) @ esm_s).squeeze(2)
+        s_s_0 = self.model.esm_s_mlp(esm_s)                        # [B, L, c_s]
 
-        # Build pair features (zeros, same as normal forward)
-        c_z = self.model.config.esmfold_config.trunk.pairwise_state_dim
-        s_z_0 = s_s_0.new_zeros(B, L, L, c_z)
+        with torch.no_grad():
+            c_z = self.model.config.esmfold_config.trunk.pairwise_state_dim
+            s_z_0 = s_s_0.new_zeros(B, L, L, c_z)
+            true_aa = torch.zeros(B, L, device=device, dtype=torch.long)
+            position_ids = torch.arange(L, device=device).unsqueeze(0)
+            mask = torch.ones(B, L, device=device, dtype=torch.float)
 
-        # Build aa indices (argmax of logits for true_aa)
-        # EsmFoldingTrunk needs true_aa in AF2 index space (0-based, 20 classes)
-        # We pass zeros here since we don't have discrete tokens; this only affects
-        # the structure module's angle resnet, not the pLDDT head.
-        true_aa = torch.zeros(B, L, device=device, dtype=torch.long)
-        position_ids = torch.arange(L, device=device).unsqueeze(0)  # [B, L]
-        mask = torch.ones(B, L, device=device, dtype=torch.float)
-
-        # Run folding trunk
         structure = self.model.trunk(
             s_s_0, s_z_0, true_aa, position_ids, mask, no_recycles=0
         )
 
-        # Compute pLDDT from lddt_head
         from transformers.models.esm.modeling_esmfold import categorical_lddt
         lddt_head = self.model.lddt_head(structure["states"]).reshape(
             structure["states"].shape[0], B, L, -1, self.model.lddt_bins
@@ -213,11 +209,12 @@ class ESMFoldScorer:
             4. Loss = -mean(pLDDT) -> backprop -> Adam step on logits
             5. Anneal tau: 1.0 -> 0.1 (encourages discrete convergence)
             6. Track best sequence at highest pLDDT step
+            7. Flush GPU cache after attack completes
         """
         steps = steps or self.cfg.esm_design_steps
         L = len(seq)
 
-        orig_plddt = self.score(seq)
+        orig_plddt = self.score(seq)  # score() calls empty_cache internally
         logits = torch.nn.Parameter(self._seq_to_logits(seq).to(self.cfg.device))
         optimizer = torch.optim.Adam([logits], lr=self.cfg.esm_lr)
 
@@ -226,7 +223,7 @@ class ESMFoldScorer:
         plddt_curve = [orig_plddt]
 
         for step in range(steps):
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # set_to_none frees grad memory immediately
             progress = step / steps
             tau = self.cfg.esm_temp * (
                 self.cfg.esm_temp_final / self.cfg.esm_temp
@@ -250,6 +247,7 @@ class ESMFoldScorer:
                     f"tau={tau:.3f} pLDDT={cur_plddt:.1f}"
                 )
 
+        self._empty_cache()
         return {
             "original_seq": seq,
             "attacked_seq": best_seq,
@@ -260,16 +258,17 @@ class ESMFoldScorer:
         }
 
     def gradient_sensitivity(self, seq: str) -> np.ndarray:
-        """Compute gradient magnitude per residue position.
+        """Compute per-residue gradient magnitude of pLDDT w.r.t. ESM-2 embeddings.
 
-        Returns per-position gradient norm of pLDDT w.r.t. ESM-2 word embeddings.
         High values = positions where small perturbations cause large pLDDT changes.
         Used to guide BLOSUM mutation site selection.
 
         The ESM-2 backbone runs in fp16 but gradients must accumulate in fp32.
-        We keep a float32 proxy tensor that receives gradients via a fp32->fp16
-        cast using a retain_grad hook, avoiding the embed.grad=None issue caused
-        by .half() breaking the autograd graph back to the original float tensor.
+        We keep a float32 proxy tensor and call retain_grad() on the fp16 view
+        to avoid embed.grad=None from the half() cast breaking the autograd graph.
+
+        All non-differentiable construction (masks, position ids, pair features)
+        runs under no_grad to reduce peak memory.
         """
         tokens = self.tokenizer(
             [seq], return_tensors="pt", add_special_tokens=False
@@ -277,38 +276,40 @@ class ESMFoldScorer:
         input_ids = tokens["input_ids"]
         B, L = input_ids.shape
 
-        # Build ESM input with CLS/EOS
-        bos = input_ids.new_full((B, 1), self.model.esm_dict_cls_idx)
-        eos = input_ids.new_full((B, 1), self.model.esm_dict_padding_idx)
-        esmaa = torch.cat([bos, input_ids, eos], dim=1)
-        esmaa[range(B), (esmaa != 1).sum(1)] = self.model.esm_dict_eos_idx
+        with torch.no_grad():
+            bos = input_ids.new_full((B, 1), self.model.esm_dict_cls_idx)
+            eos = input_ids.new_full((B, 1), self.model.esm_dict_padding_idx)
+            esmaa = torch.cat([bos, input_ids, eos], dim=1)
+            esmaa[range(B), (esmaa != 1).sum(1)] = self.model.esm_dict_eos_idx
 
-        # float32 proxy: gradients accumulate here
+        # float32 proxy leaf — gradients accumulate here
         embed_f32 = self.model.esm.embeddings.word_embeddings(esmaa).float()
         embed_f32.requires_grad_(True)
 
-        # fp16 view for ESM-2 (which runs in half precision)
-        # We register retain_grad on the fp16 tensor so backward can flow through it,
-        # then manually pull gradients back to embed_f32 via the chain rule.
+        # fp16 view for ESM-2; retain_grad keeps gradient on this non-leaf tensor
         embed_f16 = embed_f32.half()
-        embed_f16.retain_grad()  # keep grad on the non-leaf fp16 tensor
+        embed_f16.retain_grad()
 
-        attn_mask = torch.ones(B, L + 2, device=self.cfg.device, dtype=torch.bool)
+        with torch.no_grad():
+            attn_mask = torch.ones(B, L + 2, device=self.cfg.device, dtype=torch.bool)
+
         esm_out = self.model.esm(
             inputs_embeds=embed_f16,
             attention_mask=attn_mask,
             output_hidden_states=True,
         )
-        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)  # [B, L+2, layers+1, D]
-        esm_s = esm_hidden[:, 1:-1]  # [B, L, layers+1, D]
+        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)
+        esm_s = esm_hidden[:, 1:-1]
         esm_s = esm_s.to(self.model.esm_s_combine.dtype)
         esm_s = (self.model.esm_s_combine.softmax(0).unsqueeze(0) @ esm_s).squeeze(2)
         s_s_0 = self.model.esm_s_mlp(esm_s)
-        c_z = self.model.config.esmfold_config.trunk.pairwise_state_dim
-        s_z_0 = s_s_0.new_zeros(B, L, L, c_z)
-        true_aa = torch.zeros(B, L, device=self.cfg.device, dtype=torch.long)
-        position_ids = torch.arange(L, device=self.cfg.device).unsqueeze(0)
-        mask = torch.ones(B, L, device=self.cfg.device, dtype=torch.float)
+
+        with torch.no_grad():
+            c_z = self.model.config.esmfold_config.trunk.pairwise_state_dim
+            s_z_0 = s_s_0.new_zeros(B, L, L, c_z)
+            true_aa = torch.zeros(B, L, device=self.cfg.device, dtype=torch.long)
+            position_ids = torch.arange(L, device=self.cfg.device).unsqueeze(0)
+            mask = torch.ones(B, L, device=self.cfg.device, dtype=torch.float)
 
         structure = self.model.trunk(
             s_s_0, s_z_0, true_aa, position_ids, mask, no_recycles=0
@@ -320,8 +321,7 @@ class ESMFoldScorer:
         plddt = categorical_lddt(lddt_head[-1], bins=self.model.lddt_bins)
         plddt.mean().backward()
 
-        # Gradient w.r.t. residue embeddings: use fp16 grad upcast to fp32,
-        # strip CLS/EOS tokens, compute per-position L2 norm.
-        grad = embed_f16.grad.float()          # [B, L+2, D] in fp32
+        grad = embed_f16.grad.float()                                  # [B, L+2, D]
         grad_mag = grad[0, 1:-1].norm(dim=-1).detach().cpu().numpy()  # [L]
+        self._empty_cache()
         return grad_mag
