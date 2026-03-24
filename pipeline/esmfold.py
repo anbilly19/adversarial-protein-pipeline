@@ -265,30 +265,42 @@ class ESMFoldScorer:
         Returns per-position gradient norm of pLDDT w.r.t. ESM-2 word embeddings.
         High values = positions where small perturbations cause large pLDDT changes.
         Used to guide BLOSUM mutation site selection.
+
+        The ESM-2 backbone runs in fp16 but gradients must accumulate in fp32.
+        We keep a float32 proxy tensor that receives gradients via a fp32->fp16
+        cast using a retain_grad hook, avoiding the embed.grad=None issue caused
+        by .half() breaking the autograd graph back to the original float tensor.
         """
         tokens = self.tokenizer(
             [seq], return_tensors="pt", add_special_tokens=False
         ).to(self.cfg.device)
-        # Get the ESM-2 word embeddings for the input, with gradients enabled
         input_ids = tokens["input_ids"]
-        # Add CLS/EOS as ESMFold does internally
         B, L = input_ids.shape
+
+        # Build ESM input with CLS/EOS
         bos = input_ids.new_full((B, 1), self.model.esm_dict_cls_idx)
         eos = input_ids.new_full((B, 1), self.model.esm_dict_padding_idx)
         esmaa = torch.cat([bos, input_ids, eos], dim=1)
         esmaa[range(B), (esmaa != 1).sum(1)] = self.model.esm_dict_eos_idx
 
-        embed = self.model.esm.embeddings.word_embeddings(esmaa).float()  # [B, L+2, D]
-        embed.requires_grad_(True)
+        # float32 proxy: gradients accumulate here
+        embed_f32 = self.model.esm.embeddings.word_embeddings(esmaa).float()
+        embed_f32.requires_grad_(True)
+
+        # fp16 view for ESM-2 (which runs in half precision)
+        # We register retain_grad on the fp16 tensor so backward can flow through it,
+        # then manually pull gradients back to embed_f32 via the chain rule.
+        embed_f16 = embed_f32.half()
+        embed_f16.retain_grad()  # keep grad on the non-leaf fp16 tensor
 
         attn_mask = torch.ones(B, L + 2, device=self.cfg.device, dtype=torch.bool)
         esm_out = self.model.esm(
-            inputs_embeds=embed.half(),
+            inputs_embeds=embed_f16,
             attention_mask=attn_mask,
             output_hidden_states=True,
         )
-        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)  # [B, L+2, n_layers+1, D]
-        esm_s = esm_hidden[:, 1:-1]  # [B, L, n_layers+1, D]
+        esm_hidden = torch.stack(esm_out["hidden_states"], dim=2)  # [B, L+2, layers+1, D]
+        esm_s = esm_hidden[:, 1:-1]  # [B, L, layers+1, D]
         esm_s = esm_s.to(self.model.esm_s_combine.dtype)
         esm_s = (self.model.esm_s_combine.softmax(0).unsqueeze(0) @ esm_s).squeeze(2)
         s_s_0 = self.model.esm_s_mlp(esm_s)
@@ -308,6 +320,8 @@ class ESMFoldScorer:
         plddt = categorical_lddt(lddt_head[-1], bins=self.model.lddt_bins)
         plddt.mean().backward()
 
-        # Gradient w.r.t. the residue embeddings (strip CLS/EOS)
-        grad_mag = embed.grad[0, 1:-1].norm(dim=-1).detach().cpu().numpy()  # [L]
+        # Gradient w.r.t. residue embeddings: use fp16 grad upcast to fp32,
+        # strip CLS/EOS tokens, compute per-position L2 norm.
+        grad = embed_f16.grad.float()          # [B, L+2, D] in fp32
+        grad_mag = grad[0, 1:-1].norm(dim=-1).detach().cpu().numpy()  # [L]
         return grad_mag
