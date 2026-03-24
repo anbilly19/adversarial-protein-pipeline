@@ -14,6 +14,7 @@ Reference:
     Alkhouri et al. 2024 (gradient-guided BLOSUM attack)
 """
 
+import argparse
 import numpy as np
 import esm
 import torch
@@ -53,17 +54,19 @@ class InverseFoldingModule:
     def _load(self):
         """Lazy-load ESM-IF1 (requires fair-esm package).
 
-        For local checkpoints, the .pt file must be torch.load()-ed first
-        to obtain the model_data dict before passing to load_model_and_alphabet_core.
-        Passing a file path string directly causes a TypeError because the function
-        expects a deserialized checkpoint dict, not a path.
+        PyTorch 2.6 changed torch.load to default weights_only=True, which
+        blocks argparse.Namespace (stored in ESM checkpoint 'args' key) from
+        being unpickled. We allowlist argparse.Namespace explicitly so that
+        weights_only safety is preserved for all other globals.
         """
         if self._model is None:
             try:
                 if self.cfg.esm_if1_checkpoint:
                     print(f"[ESM-IF1] Loading from local checkpoint: {self.cfg.esm_if1_checkpoint}")
-                    # Must torch.load first — load_model_and_alphabet_core expects
-                    # a deserialized dict, not a file path string.
+                    # PyTorch 2.6+: allowlist argparse.Namespace before loading.
+                    # ESM checkpoints store model config as argparse.Namespace in
+                    # the 'args' key, which is blocked by the new weights_only=True default.
+                    torch.serialization.add_safe_globals([argparse.Namespace])
                     model_data = torch.load(
                         self.cfg.esm_if1_checkpoint, map_location="cpu"
                     )
