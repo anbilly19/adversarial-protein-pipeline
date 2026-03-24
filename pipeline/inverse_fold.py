@@ -51,14 +51,24 @@ class InverseFoldingModule:
         self._alphabet = None
 
     def _load(self):
-        """Lazy-load ESM-IF1 (requires fair-esm package)."""
+        """Lazy-load ESM-IF1 (requires fair-esm package).
+
+        For local checkpoints, the .pt file must be torch.load()-ed first
+        to obtain the model_data dict before passing to load_model_and_alphabet_core.
+        Passing a file path string directly causes a TypeError because the function
+        expects a deserialized checkpoint dict, not a path.
+        """
         if self._model is None:
             try:
                 if self.cfg.esm_if1_checkpoint:
                     print(f"[ESM-IF1] Loading from local checkpoint: {self.cfg.esm_if1_checkpoint}")
+                    # Must torch.load first — load_model_and_alphabet_core expects
+                    # a deserialized dict, not a file path string.
+                    model_data = torch.load(
+                        self.cfg.esm_if1_checkpoint, map_location="cpu"
+                    )
                     self._model, self._alphabet = esm.pretrained.load_model_and_alphabet_core(
-                        "esm_if1_gvp4_t16_142M_UR50",
-                        self.cfg.esm_if1_checkpoint,
+                        "esm_if1_gvp4_t16_142M_UR50", model_data
                     )
                 else:
                     print("[ESM-IF1] No local checkpoint set, downloading from HuggingFace...")
