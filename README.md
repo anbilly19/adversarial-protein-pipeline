@@ -1,112 +1,105 @@
 # Adversarial Protein Pipeline
 
-A research pipeline for probing the robustness of AlphaFold3 and ESMFold confidence scores via white-box adversarial attacks. Combines three complementary attack strategies into a unified, modular codebase.
+A gradient-free pipeline for generating adversarial protein sequences that confuse AlphaFold3's confidence scoring.
 
-## Overview
+## Branches
 
-AlphaFold3's confidence metrics (pLDDT, PAE, ipTM) measure internal model consistency, not physical reality. This pipeline exploits that gap through:
+| Branch | Oracle | GPU Required | Attack Method |
+|---|---|---|---|
+| `stable-gradient-attack` | ESMFold (local) | ✅ Yes | ESM-Design gradient attack |
+| `gradient-free-de-attack` | ESM-2 OFS PPL (CPU) | ❌ No | Differential Evolution |
 
-| Strategy | Method | Key Insight |
-|---|---|---|
-| **ESM-Design attack** | Gradient descent through ESMFold | Replaces discrete tokenizer with soft embeddings — makes the entire forward pass differentiable |
-| **BLOSUM62 mutations** | Conservative substitutions at gradient-sensitive positions | Looks biologically valid but maximally disrupts co-evolutionary signal |
-| **Inverse folding** | ESM-IF1 at high temperature | Generates structurally plausible sequences that deviate from the native — ideal adversarial seeds |
-| **Trick sequences** | Known fold-switchers + chameleons | Hard-coded adversarial seeds from fold-switching literature |
+---
 
-## Repository Structure
+## `gradient-free-de-attack` — Overview
 
-```
-adversarial-protein-pipeline/
-  pipeline/
-    __init__.py          # Package exports
-    config.py            # PipelineConfig dataclass
-    trick_sequences.py   # Fold-switchers, chameleons, BLOSUM baselines + BLOSUM62 table
-    protgpt2.py          # ProtGPT2 generation + perplexity filtering
-    esmfold.py           # ESMFold scoring + ESM-Design gradient attack
-    inverse_fold.py      # ESM-IF1 inverse folding + BLOSUM adversarial mutations
-  run_pipeline.py        # Main orchestration script (CLI)
-  requirements.txt
-```
+This branch replaces all gradient-based components with a **black-box Differential Evolution (DE)** loop. The fitness oracle is **ESM-2 OFS pseudo-perplexity** — a single forward pass per sequence, no backpropagation, runs on CPU with the 8M parameter model (~35 MB).
 
-## Installation
+### Key idea
+
+Higher ESM-2 pseudo-perplexity (PPL) means the model considers the sequence evolutionarily implausible, which correlates with low predicted pLDDT. Attacking toward higher PPL therefore acts as a proxy for disrupting AlphaFold3's confidence.
+
+### Hardware requirements
+
+- **CPU only** — no CUDA, no GPU needed
+- ~4 GB system RAM
+- ESM-2 8M model: ~35 MB download
+- ProtGPT2 (optional): ~1.5 GB download
+
+### Install
 
 ```bash
-git clone https://github.com/anbilly19/adversarial-protein-pipeline
-cd adversarial-protein-pipeline
 pip install -r requirements.txt
 ```
 
-> **Note:** `fair-esm` requires a separate install step for ESM-IF1:
-> ```bash
-> pip install fair-esm
-> # For ESMFold via HuggingFace (alternative):
-> pip install transformers accelerate
-> ```
+### Usage
 
-## Usage
-
-### Mode 1 — Trick sequences only (fastest, no GPU required for generation)
 ```bash
-python run_pipeline.py --tricks-only --steps 300 --plddt-target 88
+# Trick sequences only (no PDB, fastest)
+python run_pipeline.py --tricks-only
+
+# From PDB (single chain)
+python run_pipeline.py --pdb rfah.pdb --chain A
+
+# From PDB (protein complex, all chains)
+python run_pipeline.py --complex --pdb 7k3g.pdb
+
+# From PDB (specific chains)
+python run_pipeline.py --complex --pdb 7k3g.pdb --chains A,B
+
+# Tune DE budget
+python run_pipeline.py --pdb rfah.pdb --de-pop 32 --de-gen 8 --ppl-target 30.0
+
+# Use a larger ESM-2 model for a stronger oracle
+python run_pipeline.py --pdb rfah.pdb --esm2-model facebook/esm2_t12_35M_UR50D
 ```
 
-### Mode 2 — ProtGPT2 seed + ESM-Design attack
-```bash
-python run_pipeline.py --n-generated 30 --steps 300
-```
-
-### Mode 3 — Start from PDB structure
-```bash
-# Download RfaH (known fold-switcher) from PDB: 2LCL
-python run_pipeline.py --pdb rfah.pdb --chain B --steps 500 --top-k 5
-```
-
-### Mode 4 — Full pipeline
-```bash
-python run_pipeline.py \
-  --pdb rfah.pdb --chain B \
-  --use-tricks \
-  --n-generated 50 \
-  --steps 300 \
-  --plddt-target 90 \
-  --top-k 5 \
-  --output-dir af3_jobs
-```
-
-Outputs are AlphaFold3-compatible JSON files in `af3_jobs/` ready to submit to the AF3 server or local inference.
-
-## Pipeline Stages
+### Pipeline stages
 
 ```
-Stage 0  Trick sequences     Hardcoded fold-switchers, chameleons, BLOSUM variants
-Stage 1  Inverse folding     ESM-IF1 from PDB backbone (high-temperature sampling)
-         BLOSUM mutations    Gradient-guided conservative substitutions on native seq
-Stage 2  ProtGPT2            Generate + perplexity-filter (low PPL -> high pLDDT proxy)
-Stage 3  ESMFold scoring     Batch pLDDT pre-score all candidates; sort descending
-Stage 4  ESM-Design attack   Gradient descent on top-k; Gumbel-softmax + temp annealing
-Stage 5  AF3 export          Write JSON jobs for each successful attack
+Stage 0  Load hardcoded trick sequences (fold-switchers, chameleons, repeats)
+Stage 1  Read native sequence from PDB + ESM-2 surprisal-guided BLOSUM seeds
+Stage 2  ProtGPT2 generation + perplexity filter          (optional)
+Stage 3  Score all candidates: ESM-2 OFS pseudo-perplexity (CPU, ~7 ms/seq)
+Stage 4  Differential Evolution attack on top-k candidates
+Stage 5  Export attacked sequences as AlphaFold3 Server JSON files
 ```
 
-## Key Hyperparameters
+### DE configuration
 
-| Parameter | Default | Effect |
+| Parameter | Default | Description |
 |---|---|---|
-| `esm_design_steps` | 300 | Gradient steps — 300 sufficient for pLDDT maximization |
-| `esm_lr` | 0.01 | Adam LR — keep <= 0.05 |
-| `esm_temp` / `esm_temp_final` | 1.0 / 0.1 | Gumbel-softmax temperature annealing |
-| `plddt_target` | 90.0 | Attack success threshold |
-| `n_mutations` | 5 | BLOSUM positions to mutate |
-| `if_temperature` | 1.5 | ESM-IF1 sampling temp (higher = more diverse) |
-| `top_k_attack` | 5 | Candidates to run gradient attack on |
+| `--de-pop` | 16 | Population size (≥ 4) |
+| `--de-gen` | 6 | Generations |
+| `--ppl-target` | 25.0 | PPL threshold for success |
+| `--top-k` | 5 | Candidates to attack |
+| `n_mutations` | 3 | Mutations per individual (DE budget b) |
 
-## Why It Works
+### Oracle sizing
 
-All three attack strategies share the same root cause: **AF3's confidence heads are trained jointly with structure prediction on PDB data**, so the gradient of confidence w.r.t. the input is just as informative as the gradient of coordinate error. The model has no mechanism to distinguish a genuinely stable protein from a hallucination that happens to match its training distribution.
+| ESM-2 model | Params | Size | Speed (CPU) | Accuracy proxy |
+|---|---|---|---|---|
+| `esm2_t6_8M_UR50D` | 8M | ~35 MB | ~7 ms/seq | Fast, good enough for DE |
+| `esm2_t12_35M_UR50D` | 35M | ~140 MB | ~30 ms/seq | Better sensitivity |
+| `esm2_t30_150M_UR50D` | 150M | ~600 MB | ~120 ms/seq | Strong oracle |
 
-## References
+### Architecture
 
-- Alkhouri et al. 2024 — *Probing AlphaFold's Input Attack Surface via Red-Teaming* (IEEE PST)
-- Chu et al. 2024 — ESM-Design hallucination via differentiable embedding
-- Hsu et al. 2022 — ESM-IF1 inverse folding (NeurIPS)
-- Porter et al. 2022 — RfaH fold-switching (PNAS)
-- Verkuil et al. 2022 — ESMFold (Science)
+```
+pipeline/
+  config.py          PipelineConfig (no torch.cuda dependency)
+  esm2_scorer.py     ESM-2 OFS pseudo-perplexity oracle  [NEW]
+  de_attacker.py     DE/rand/1/bin attacker               [NEW]
+  inverse_fold.py    BLOSUMAttack (random + sensitivity-guided, no ESM-IF1)
+  trick_sequences.py Hardcoded adversarial sequences      [unchanged]
+  protgpt2.py        ProtGPT2 generator                   [unchanged]
+  pdb_utils.py       PDB sequence reading                 [unchanged]
+  __init__.py        Package exports
+```
+
+### References
+
+- Xu et al. 2023 — AF2-Mutation: Adversarial Sequence Mutations against AlphaFold2 ([arXiv:2305.08929](https://arxiv.org/abs/2305.08929))
+- Ferruz et al. 2025 — Pseudo-perplexity in one fell swoop
+- Alkhouri et al. 2024 — Gradient-guided BLOSUM attack (IEEE PST)
+- Storn & Price 1997 — Differential Evolution (J. Global Optimization)

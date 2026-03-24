@@ -1,11 +1,9 @@
-# Core ML
-torch>=2.0.0
-transformers>=4.36.0
-accelerator>=0.25.0
-
 # Protein-specific
-fair-esm>=2.0.0          # ESMFold + ESM-IF1 (facebook/esm)
 biopython>=1.81          # PDB parsing
+
+# Transformer / ESM-2 (CPU-only, no CUDA required)
+transformers>=4.36.0
+torch>=2.0.0             # CPU builds are fine; no GPU needed
 
 # Scientific computing
 numpy>=1.24.0
@@ -13,3 +11,4 @@ scipy>=1.11.0
 
 # Utilities
 tqdm>=4.65.0
+requests>=2.31.0

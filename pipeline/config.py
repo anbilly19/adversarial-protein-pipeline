@@ -1,40 +1,41 @@
+"""PipelineConfig: all hyperparameters for the gradient-free DE pipeline.
+
+No GPU required. ESM-2 8M runs comfortably on CPU (~7 ms / sequence).
+"""
 from dataclasses import dataclass, field
 import os
-import torch
 
 
 @dataclass
 class PipelineConfig:
-    # ── Model paths (set for air-gapped / HPC use) ──────────────────────
-    esmfold_model_path: str = os.environ.get("ESMFOLD_MODEL_PATH", "facebook/esmfold_v1")
-    protgpt2_model_path: str = os.environ.get("PROTGPT2_MODEL_PATH", "nferruz/ProtGPT2")
-    esm_if1_checkpoint: str = os.environ.get("ESM_IF1_CHECKPOINT", None)  # path to .pt file
+    # ── ESM-2 oracle (CPU, forward-pass only) ───────────────────────────
+    esm2_model_name: str = os.environ.get(
+        "ESM2_MODEL_NAME", "facebook/esm2_t6_8M_UR50D"
+    )  # 8 M params, ~35 MB, runs on CPU in ~7 ms/seq
 
-    # ProtGPT2 generation
+    # ── ProtGPT2 generation ──────────────────────────────────────────────
+    protgpt2_model_path: str = os.environ.get("PROTGPT2_MODEL_PATH", "nferruz/ProtGPT2")
     n_generated: int = 50
     max_seq_len: int = 150
     top_k_generation: int = 950
     rep_penalty: float = 1.2
     perplexity_threshold: float = 15.0
 
-    # ESM-Design gradient attack
-    esm_design_steps: int = 300
-    esm_lr: float = 0.01
-    esm_temp: float = 1.0
-    esm_temp_final: float = 0.1
-    plddt_target: float = 90.0
-
-    # BLOSUM adversarial mutations
-    n_mutations: int = 5
+    # ── BLOSUM random mutations (seed candidates) ────────────────────────
+    n_mutations: int = 3        # DE budget b (mutations per individual)
     n_blosum_variants: int = 10
 
-    # ESM-IF1 inverse folding
-    n_if_sequences: int = 20
-    n_if_sequences_per_chain: int = 10  # lower budget per chain in complex mode
-    if_temperature: float = 1.5
+    # ── Differential Evolution ───────────────────────────────────────────
+    de_pop_size: int = 16       # population size (must be >= 4)
+    de_generations: int = 6     # number of generations
+    de_CR: float = 0.9          # crossover probability
+    de_W: float = 0.8           # differential weight
+    de_seed: int = 42
 
-    # General
-    batch_size: int = 4
-    top_k_attack: int = 5
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    # ── Attack target ────────────────────────────────────────────────────
+    ppl_target: float = 25.0    # adversarial success: PPL >= this threshold
+    top_k_attack: int = 5       # number of seed candidates to attack
+
+    # ── General ──────────────────────────────────────────────────────────
     output_dir: str = "af3_attack_jobs"
+    device: str = "cpu"         # intentionally CPU-only
