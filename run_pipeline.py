@@ -16,6 +16,10 @@ Usage:
     # Mode 5: Attack all chains of a protein complex (one AF3 JSON per chain)
     python run_pipeline.py --complex --pdb 7k3g.pdb
     python run_pipeline.py --complex --pdb 7k3g.pdb --chains A,B
+
+    # Mode 6: Skip ESM-IF1 entirely (no biotite/torch_scatter needed)
+    python run_pipeline.py --pdb rfah.pdb --skip-if1
+    python run_pipeline.py --complex --pdb 7k3g.pdb --skip-if1
 """
 
 # ---------------------------------------------------------------------------
@@ -59,11 +63,10 @@ from pipeline import (
     PipelineConfig,
     ProtGPT2Generator,
     ESMFoldScorer,
-    InverseFoldingModule,
     BLOSUMAttack,
     get_all_trick_sequences,
 )
-from pipeline.inverse_fold import _get_chain_ids
+from pipeline.pdb_utils import read_pdb_sequences, get_chain_ids as _pdb_chain_ids
 
 
 # ---------------------------------------------------------------------------
@@ -96,20 +99,7 @@ def make_af3_job(seq: str, name: str, seed: int = 42) -> List[Dict]:
 
 
 def make_af3_job_single_chain(seq: str, chain_id: str, name: str, seed: int = 42) -> List[Dict]:
-    """Format one attacked chain as a standalone single-chain AF3 job.
-
-    Each attacked chain is exported independently so AF3 can evaluate
-    the per-chain foldability of the attacked sequence in isolation.
-
-    Args:
-        seq: Attacked amino acid sequence
-        chain_id: Original chain identifier (used in job name)
-        name: Descriptive job name
-        seed: AF3 model seed
-
-    Returns:
-        AF3-compatible job list (alphafoldserver dialect v1)
-    """
+    """Format one attacked chain as a standalone single-chain AF3 job."""
     return [
         {
             "name": name,
@@ -173,7 +163,7 @@ def _print_complex_summary(chain_results: Dict[str, List[Dict]], cfg: PipelineCo
 
 
 # ---------------------------------------------------------------------------
-# Single-chain pipeline (original)
+# Single-chain pipeline
 # ---------------------------------------------------------------------------
 
 def run(
@@ -182,11 +172,13 @@ def run(
     chain_id: str = "A",
     use_tricks: bool = True,
     n_generated: int = None,
+    skip_if1: bool = False,
 ) -> List[Dict]:
     """Run the full adversarial protein pipeline.
 
     Stage 0: Load hardcoded trick sequences (fold-switchers, chameleons, BLOSUM)
-    Stage 1: ESM-IF1 inverse folding from PDB (optional)
+    Stage 1: ESM-IF1 inverse folding from PDB (skipped if skip_if1=True)
+             OR native sequence extraction from PDB (if skip_if1=True)
     Stage 2: ProtGPT2 generation + perplexity filter (optional)
     Stage 3: BLOSUM gradient-guided mutations on native PDB sequence (if PDB given)
     Stage 4: Score all candidates with ESMFold
@@ -195,10 +187,12 @@ def run(
 
     Args:
         cfg: PipelineConfig with all hyperparameters
-        pdb_path: Optional path to PDB file for inverse folding
+        pdb_path: Optional path to PDB file
         chain_id: Chain to use from PDB
         use_tricks: Whether to include trick sequences
         n_generated: Override cfg.n_generated
+        skip_if1: Skip ESM-IF1 inverse folding entirely; use native PDB sequence
+                  directly as the seed for BLOSUM mutations instead.
 
     Returns:
         List of result dicts with attack outcomes
@@ -212,16 +206,30 @@ def run(
         print(f"[Stage 0] Loaded {len(tricks)} trick sequences")
         all_candidates.extend(tricks)
 
-    # -- Stage 1: Inverse folding + BLOSUM mutations from PDB --------------------
+    # -- Stage 1: Seed sequences from PDB ----------------------------------------
     esm_scorer = ESMFoldScorer(cfg)
-    if pdb_path:
-        print(f"[Stage 1] Inverse folding from {pdb_path} (chain={chain_id})...")
-        if_module = InverseFoldingModule(cfg)
-        if_seqs = if_module.from_pdb(pdb_path, chain_id)
-        all_candidates.extend(if_seqs)
-        print(f"  -> {len(if_seqs)} inverse-folded sequences")
+    native_seq = None
 
-        native_seq = if_seqs[0]["native_seq"]
+    if pdb_path:
+        if skip_if1:
+            print(f"[Stage 1] --skip-if1: reading native sequence from {pdb_path} (chain={chain_id})")
+            chain_seqs = read_pdb_sequences(pdb_path)
+            if chain_id not in chain_seqs:
+                raise ValueError(
+                    f"Chain '{chain_id}' not found in {pdb_path}. "
+                    f"Available chains: {list(chain_seqs.keys())}"
+                )
+            native_seq = chain_seqs[chain_id]
+            print(f"  -> Native sequence length: {len(native_seq)}")
+        else:
+            from pipeline import InverseFoldingModule
+            print(f"[Stage 1] Inverse folding from {pdb_path} (chain={chain_id})...")
+            if_module = InverseFoldingModule(cfg)
+            if_seqs = if_module.from_pdb(pdb_path, chain_id)
+            all_candidates.extend(if_seqs)
+            native_seq = if_seqs[0]["native_seq"]
+            print(f"  -> {len(if_seqs)} inverse-folded sequences")
+
         print("  -> Computing gradient sensitivity for native sequence...")
         grad_mag = esm_scorer.gradient_sensitivity(native_seq)
         blosum = BLOSUMAttack(cfg)
@@ -293,7 +301,7 @@ def run(
 
 
 # ---------------------------------------------------------------------------
-# Complex attack pipeline (new)
+# Complex attack pipeline
 # ---------------------------------------------------------------------------
 
 def run_complex_attack(
@@ -301,20 +309,16 @@ def run_complex_attack(
     pdb_path: str,
     chain_ids: List[str] = None,
     af3_seed: int = 42,
+    skip_if1: bool = False,
 ) -> Dict[str, List[Dict]]:
     """Adversarial attack mode for protein complexes.
 
-    Attacks each chain of the complex independently using the same
-    inverse folding + BLOSUM + ESM-Design pipeline as the single-chain
-    mode, then exports one AF3 JSON file per chain.
-
-    Each chain is attacked in isolation because ESMFold is a single-chain
-    model. The per-chain AF3 JSON files can be used to evaluate individual
-    chain foldability. A combined multi-chain job is also exported for
-    evaluating complex-level confidence (pLDDT, ipTM).
+    Attacks each chain of the complex independently. When skip_if1=True,
+    native sequences are read directly from the PDB file using pdb_utils
+    (no ESM-IF1, biotite, or torch_scatter required).
 
     Pipeline per chain:
-        1. ESM-IF1 inverse folding (n_if_sequences_per_chain samples)
+        1. ESM-IF1 inverse folding OR native sequence from PDB (if skip_if1)
         2. Gradient-guided BLOSUM mutations on native chain sequence
         3. ESMFold batch scoring of all candidates
         4. ESM-Design gradient attack on top-k per chain
@@ -327,6 +331,7 @@ def run_complex_attack(
         pdb_path: Path to PDB/CIF file of the complex
         chain_ids: Specific chains to attack; None = auto-detect all chains
         af3_seed: AF3 model seed for all exported jobs
+        skip_if1: Skip ESM-IF1; seed BLOSUM attack from native PDB sequences only
 
     Returns:
         Dict mapping chain_id -> list of attack result dicts
@@ -334,25 +339,42 @@ def run_complex_attack(
     os.makedirs(cfg.output_dir, exist_ok=True)
 
     esm_scorer = ESMFoldScorer(cfg)
-    if_module = InverseFoldingModule(cfg)
     blosum = BLOSUMAttack(cfg)
 
-    # Stage 1: inverse folding for all chains
-    if_results = if_module.from_pdb_all_chains(pdb_path, chain_ids)
-    all_chain_ids = list(if_results.keys())
+    # Resolve chain IDs and native sequences
+    if skip_if1:
+        print(f"[Complex] --skip-if1: reading native sequences from {pdb_path}")
+        all_native_seqs = read_pdb_sequences(pdb_path)
+        if chain_ids is None:
+            chain_ids = list(all_native_seqs.keys())
+            print(f"[Complex] Auto-detected chains: {chain_ids}")
+        else:
+            print(f"[Complex] Using specified chains: {chain_ids}")
+        # Build a structure mimicking IF results: {chain_id: native_seq}
+        native_by_chain = {c: all_native_seqs[c] for c in chain_ids if c in all_native_seqs}
+    else:
+        from pipeline import InverseFoldingModule
+        if_module = InverseFoldingModule(cfg)
+        if_results = if_module.from_pdb_all_chains(pdb_path, chain_ids)
+        chain_ids = list(if_results.keys())
+        native_by_chain = {c: if_results[c][0]["native_seq"] for c in chain_ids}
 
     chain_results: Dict[str, List[Dict]] = {}
-    # best attacked sequence per chain for the combined export
     best_per_chain: Dict[str, str] = {}
 
-    for chain_id, if_candidates in if_results.items():
+    for chain_id in chain_ids:
         print(f"\n{'='*64}")
-        print(f"[Complex] Chain {chain_id} — {len(if_candidates)} IF seeds")
+        print(f"[Complex] Chain {chain_id}")
         print(f"{'='*64}")
 
-        # Gradient-guided BLOSUM mutations on native chain sequence
-        native_seq = if_candidates[0]["native_seq"]
+        native_seq = native_by_chain[chain_id]
         print(f"  Native sequence length: {len(native_seq)}")
+
+        # Seed candidates: IF sequences (if not skipped) + BLOSUM mutations
+        candidates: List[Dict] = []
+        if not skip_if1:
+            candidates.extend(if_results[chain_id])
+
         print("  Computing gradient sensitivity...")
         grad_mag = esm_scorer.gradient_sensitivity(native_seq)
         mutants = blosum.gradient_guided_mutations(
@@ -368,8 +390,7 @@ def run_complex_attack(
             }
             for i, s in enumerate(mutants)
         ]
-
-        candidates = list(if_candidates) + blosum_cands
+        candidates.extend(blosum_cands)
 
         # Score all candidates
         print(f"  Scoring {len(candidates)} candidates with ESMFold...")
@@ -397,7 +418,6 @@ def run_complex_attack(
 
         chain_results[chain_id] = results
 
-        # Best attacked sequence = highest final pLDDT for this chain
         best = max(results, key=lambda r: r["final_plddt"])
         best_per_chain[chain_id] = best["attacked_seq"]
         print(
@@ -406,7 +426,6 @@ def run_complex_attack(
             f"({'SUCCESS' if best.get('attack_success') else 'below target'})"
         )
 
-        # Export one AF3 JSON for this chain (best attacked sequence only)
         _export_chain_af3_job(
             seq=best["attacked_seq"],
             chain_id=chain_id,
@@ -415,9 +434,7 @@ def run_complex_attack(
             seed=af3_seed,
         )
 
-    # Export combined multi-chain AF3 job after all chains are processed
-    _export_combined_af3_job(best_per_chain, all_chain_ids, cfg, seed=af3_seed)
-
+    _export_combined_af3_job(best_per_chain, chain_ids, cfg, seed=af3_seed)
     _print_complex_summary(chain_results, cfg)
     return chain_results
 
@@ -429,12 +446,6 @@ def _export_chain_af3_job(
     cfg: PipelineConfig,
     seed: int = 42,
 ) -> None:
-    """Export one AF3 JSON for a single attacked chain.
-
-    File naming: chain_{chain_id}_{source}_plddt{final_plddt:.0f}.json
-    This lets you submit each chain independently to AF3 to verify
-    per-chain foldability of the attacked sequence.
-    """
     job_name = f"complex_chain{chain_id}_{result.get('source', 'attacked')}"
     job = make_af3_job_single_chain(seq, chain_id, job_name, seed)
     fname = os.path.join(
@@ -452,13 +463,6 @@ def _export_combined_af3_job(
     cfg: PipelineConfig,
     seed: int = 42,
 ) -> None:
-    """Export one combined multi-chain AF3 JSON with all attacked chains.
-
-    This lets you evaluate complex-level confidence metrics (ipTM, pLDDT)
-    on the full attacked complex in a single AF3 run.
-
-    File naming: complex_{chains}_combined.json
-    """
     sequences = [
         {"proteinChain": {"sequence": chain_seqs[c], "count": 1}}
         for c in chain_order
@@ -510,6 +514,10 @@ def parse_args():
                         help="Local path to esm_if1_gvp4_t16_142M_UR50.pt")
     parser.add_argument("--af3-seed", type=int, default=42,
                         help="Single integer seed for AF3 modelSeeds (default: 42)")
+    parser.add_argument("--skip-if1", action="store_true",
+                        help="Skip ESM-IF1 inverse folding entirely. Native sequences "
+                             "are read directly from the PDB file (no biotite or "
+                             "torch_scatter required). BLOSUM + ESM-Design attack still runs.")
 
     # Single-chain mode only
     parser.add_argument("--chain", type=str, default="A",
@@ -571,9 +579,10 @@ if __name__ == "__main__":
             pdb_path=args.pdb,
             chain_ids=chain_ids,
             af3_seed=args.af3_seed,
+            skip_if1=args.skip_if1,
         )
 
-    # ── Single-chain / trick / ProtGPT2 mode (original) ─────────────────
+    # ── Single-chain / trick / ProtGPT2 mode ───────────────────────────
     else:
         n_generated = 0 if args.tricks_only else args.n_generated
         results = run(
@@ -582,8 +591,8 @@ if __name__ == "__main__":
             chain_id=args.chain,
             use_tricks=args.use_tricks,
             n_generated=n_generated,
+            skip_if1=args.skip_if1,
         )
-        # Re-export with user-specified seed if different from default
         if args.af3_seed != 42:
             print(f"\n[Re-export] Writing AF3 JSONs with seed={args.af3_seed}...")
             for r in results:
