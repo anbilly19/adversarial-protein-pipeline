@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 import torch
 
@@ -30,11 +30,8 @@ class PipelineConfig:
 
     # ESM-IF1 inverse folding
     n_if_sequences: int = 20
+    n_if_sequences_per_chain: int = 10  # lower budget per chain in complex mode
     if_temperature: float = 1.5
-
-    # Protein complex mode
-    complex_chains: list = None          # e.g. ["A", "B", "C"] — None means auto-detect
-    n_if_sequences_per_chain: int = 10   # IF samples per chain (keep lower for complexes)
 
     # General
     batch_size: int = 4
